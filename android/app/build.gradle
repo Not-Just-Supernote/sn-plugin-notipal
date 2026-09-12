@@ -1,0 +1,202 @@
+apply plugin: "com.android.application"
+apply plugin: "org.jetbrains.kotlin.android"
+apply plugin: "org.jetbrains.kotlin.plugin.compose"
+apply plugin: "com.facebook.react"
+
+def processCustomApk(String buildType) {
+    println "Build type: ${buildType}"
+
+    def apkDir = file("${buildDir}/outputs/apk/${buildType}")
+    def originalApk = file("${apkDir}/app-${buildType}.apk")
+    def customApk = file("${apkDir}/app-${buildType}-custom.apk")
+
+    if (!originalApk.exists()) {
+        throw new GradleException("Original APK file does not exist: ${originalApk.absolutePath}")
+    }
+
+    println "Starting to process ${buildType.toUpperCase()} APK: ${originalApk.absolutePath}"
+
+    def tempDir = file("${buildDir}/temp/apk-custom-${buildType}")
+    if (tempDir.exists()) {
+        delete tempDir
+    }
+    tempDir.mkdirs()
+
+    try {
+
+        copy {
+            from zipTree(originalApk)
+            into tempDir
+        }
+
+        def libDir = file("${tempDir}/lib")
+        if (libDir.exists()) {
+            println "Processing lib directory: ${libDir.absolutePath}"
+
+            libDir.listFiles().each { archDir ->
+                if (archDir.isDirectory() && archDir.name != 'arm64-v8a') {
+                    println "Deleting architecture directory: ${archDir.name}"
+                    delete archDir
+                }
+            }
+
+            def arm64Dir = file("${libDir}/arm64-v8a")
+            if (arm64Dir.exists()) {
+                def filesToDelete = [
+                    'libc++_shared.so',
+                    'libfbjni.so',
+                    'libhermes.so',
+                    'libhermestooling.so',
+                    'libimagepipeline.so',
+                    'libjsi.so',
+                    'libnative-filters.so',
+                    'libnative-imagetranscoder.so',
+                    'libreactnative.so'
+                ]
+
+                filesToDelete.each { fileName ->
+                    def soFile = file("${arm64Dir}/${fileName}")
+                    if (soFile.exists()) {
+                        println "Deleting so file: ${fileName}"
+                        delete soFile
+                    } else {
+                        println "So file does not exist, skipping: ${fileName}"
+                    }
+                }
+
+                println "Remaining files in arm64-v8a directory:"
+                arm64Dir.listFiles().each { file ->
+                    if (file.isFile()) {
+                        println "  - ${file.name}"
+                    }
+                }
+            } else {
+                println "arm64-v8a directory does not exist"
+            }
+        } else {
+            println "lib directory does not exist"
+        }
+
+        ant.zip(destfile: customApk, basedir: tempDir)
+
+        println "Custom ${buildType.toUpperCase()} APK generated: ${customApk.absolutePath}"
+        println "Original APK size: ${(originalApk.length() / 1024 / 1024).round(2)} MB"
+        println "Custom APK size: ${(customApk.length() / 1024 / 1024).round(2)} MB"
+
+    } finally {
+
+        delete tempDir
+    }
+}
+
+['Debug', 'Release'].each { variant ->
+    def buildType = variant.toLowerCase()
+
+    tasks.register("buildCustomApk${variant}") {
+        group = 'custom'
+        description = "编译 ${variant} APK 并删除指定的 so 库文件"
+        dependsOn "assemble${variant}"
+
+        doLast {
+            processCustomApk(buildType)
+        }
+    }
+}
+
+react {
+    debuggableVariants = ["debug", "release"]
+    autolinkLibrariesWithApp()
+}
+
+def enableProguardInReleaseBuilds = false
+
+def jscFlavor = 'io.github.react-native-community:jsc-android:2026004.+'
+
+android {
+    ndkVersion rootProject.ext.ndkVersion
+    buildToolsVersion rootProject.ext.buildToolsVersion
+    compileSdk rootProject.ext.compileSdkVersion
+
+    namespace "me.laumss.notipal"
+    defaultConfig {
+        applicationId "me.laumss.notipal"
+        minSdkVersion rootProject.ext.minSdkVersion
+        targetSdkVersion rootProject.ext.targetSdkVersion
+        versionCode 1
+        versionName "1.0"
+
+        
+        ndk { abiFilters "arm64-v8a" }
+
+        
+        externalNativeBuild {
+            cmake {
+                arguments "-DANDROID_STL=c++_static"
+            }
+        }
+    }
+    externalNativeBuild {
+        cmake {
+            path file("src/main/cpp/CMakeLists.txt")
+            version "3.22.1"
+        }
+    }
+    signingConfigs {
+        debug {
+            storeFile file('debug.keystore')
+            storePassword 'android'
+            keyAlias 'androiddebugkey'
+            keyPassword 'android'
+        }
+    }
+    buildTypes {
+        
+        
+        def inklingDbg = findProperty("inklingEnableDebug")?.toString()?.toLowerCase()
+        def debugEnableDebug = (inklingDbg == "false") ? "false" : "true"
+        def releaseEnableDebug = (inklingDbg == "true") ? "true" : "false"
+        debug {
+            signingConfig signingConfigs.debug
+            buildConfigField "boolean", "ENABLE_DEBUG", debugEnableDebug
+        }
+        release {
+            buildConfigField "boolean", "ENABLE_DEBUG", releaseEnableDebug
+            signingConfig signingConfigs.debug
+            minifyEnabled enableProguardInReleaseBuilds
+            proguardFiles getDefaultProguardFile("proguard-android.txt"), "proguard-rules.pro"
+        }
+    }
+    buildFeatures {
+        compose true
+    }
+    aaptOptions {
+        additionalParameters "--package-id", "0x71", "--allow-reserved-package-id"
+    }
+    lintOptions {
+        checkReleaseBuilds false
+        abortOnError false
+    }
+}
+
+dependencies {
+
+    
+    def composeBom = platform("androidx.compose:compose-bom:2023.10.01")
+    implementation(composeBom)
+    implementation("androidx.compose.foundation:foundation")
+    implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.runtime:runtime")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
+    implementation("androidx.lifecycle:lifecycle-viewmodel:2.8.7")
+    implementation("androidx.savedstate:savedstate:1.2.1")
+    implementation("org.java-websocket:Java-WebSocket:1.5.7")
+
+    implementation("com.facebook.react:react-android")
+
+    if (hermesEnabled.toBoolean()) {
+        implementation("com.facebook.react:hermes-android")
+    } else {
+        implementation jscFlavor
+    }
+}

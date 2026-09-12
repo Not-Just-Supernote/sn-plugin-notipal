@@ -1,0 +1,36 @@
+{
+  "name": "plugin_notipal",
+  "version": "0.0.1",
+  "private": true,
+  "scripts": {
+    "android": "react-native run-android",
+    "start": "react-native start",
+    "lint": "eslint .",
+    "test": "jest"
+  },
+  "dependencies": {
+    "@react-native-community/image-editor": "^4.3.0",
+    "react": "19.0.0",
+    "react-native": "0.79.2",
+    "react-native-fs": "^2.20.0",
+    "sn-plugin-lib": "^0.1.65"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.25.2",
+    "@babel/preset-env": "^7.25.3",
+    "@babel/runtime": "^7.25.0",
+    "@react-native-community/cli": "^20.0.1",
+    "@react-native/babel-preset": "0.79.2",
+    "@react-native/eslint-config": "0.79.2",
+    "@react-native/gradle-plugin": "0.79.2",
+    "@react-native/metro-config": "0.79.2",
+    "@react-native/typescript-config": "0.79.2",
+    "@types/react": "^19.0.0",
+    "eslint": "^8.19.0",
+    "prettier": "2.8.8",
+    "typescript": "5.0.4"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

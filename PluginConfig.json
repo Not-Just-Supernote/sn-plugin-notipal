@@ -1,0 +1,27 @@
+﻿{
+    "name":  "Notipal",
+    "author":  "Yalums",
+    "pluginID":  "19uq35yjd3tr3zjr",
+    "pluginKey":  "me_laumss_notipal",
+    "iconPath":  "./assets/toolbar_icon.png",
+    "desc":  {
+                 "en":  "A versatile toolkit for notes and documents. Capture content as floating notes, insert images into notes, transfer text, images, documents and clipboard content via LocalSend, connect to AI clients, and customize handwriting styles and layers.",
+                 "zh_CN":  "一款面向笔记与文档的多功能工具集。支持截取内容为悬浮便签、插入图片到笔记，通过 LocalSend 传输文本、图片、文档与剪贴板内容，连接 AI 客户端，并调整笔迹样式与元素图层。",
+                 "zh_TW":  "一款面向筆記與文件的多功能工具集。支援擷取內容為懸浮便籤、插入圖片到筆記，透過 LocalSend 傳輸文字、圖片、文件與剪貼簿內容，連接 AI 用戶端，並調整筆跡樣式與元素圖層。",
+                 "ja":  "ノートとドキュメント向けの多機能ツールキットです。内容をフローティングメモとして切り取り、画像をノートへ挿入できるほか、LocalSend によるテキスト・画像・ドキュメント・クリップボードの転送、AI クライアントとの連携、手書きスタイルやレイヤーの調整にも対応します。"
+             },
+    "versionCode":  "1466",
+    "versionName":  "0.1.217",
+    "jsMainPath":  "index",
+    "uses-permissions":  [
+                             "plugin.permission.FILE:READ",
+                             "plugin.permission.FILE:WRITE",
+                             "plugin.permission.FILE:DELETE",
+                             "plugin.permission.INTERNET"
+                         ],
+    "reactPackages":  [
+                          "me.laumss.notipal.InklingPackages",
+                          "com.reactnativecommunity.imageeditor.ImageEditorPackage",
+                          "com.rnfs.RNFSPackage"
+                      ]
+}
