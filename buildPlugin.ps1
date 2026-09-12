@@ -898,6 +898,9 @@ function Build-ReactNativeBundle {
         Write-ColorOutput 'Log mode: STRIPPED (release build)' 'Blue'
     }
 
+    Write-ColorOutput 'Copying mathjax from node_modules...' 'Blue'
+    & npm run copy-mathjax --prefix $ProjectRoot
+
     $bundleOutput = Join-Path $OutputDir "$ProjectName.bundle"
     $assetsDir = $OutputDir
 

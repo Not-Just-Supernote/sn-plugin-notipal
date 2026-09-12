@@ -6,10 +6,12 @@
     "android": "react-native run-android",
     "start": "react-native start",
     "lint": "eslint .",
-    "test": "jest"
+    "test": "jest",
+    "copy-mathjax": "node -e \"const fs=require('fs');fs.mkdirSync('android/app/src/main/assets/formula',{recursive:true});fs.copyFileSync('node_modules/mathjax/es5/tex-svg.js','android/app/src/main/assets/formula/tex-svg.js');console.log('mathjax copied');\""
   },
   "dependencies": {
     "@react-native-community/image-editor": "^4.3.0",
+    "mathjax": "3.2.2",
     "react": "19.0.0",
     "react-native": "0.79.2",
     "react-native-fs": "^2.20.0",
