@@ -21,7 +21,7 @@ import {
   stopMode, stopAiMode,
 } from './components/BackgroundService';
 import { executeAction, attachModeListeners, detachModeListeners, getPaletteLassoInfo, snapshotCreate, snapshotRestore, snapshotDelete } from './components/ToolActions';
-import { modifyLiveElements, ensureMarkerDirection, isMarkerStroke, MARKER_PT } from './components/ElementOps';
+import { modifyLiveElements, modifyFileElements, ensureMarkerDirection, isMarkerStroke, MARKER_PT } from './components/ElementOps';
 import { FileLogger } from './components/FileLogger';
 import { LassoExtractor } from './components/LassoExtractor';
 import { t } from './components/i18n';
@@ -415,6 +415,19 @@ function App(): React.JSX.Element {
       }
       lastInsertTime = now;
 
+      
+      if (FloatingToolbarBridge.isMosaicBoardVisible()) {
+        const source = fromInsertNext ? 'inkling-doc-screenshot' : 'inkling-insert-image';
+        const ok = await FloatingToolbarBridge.enqueueMosaicImage(path, source);
+        console.log('[INSERT-DBG/App] routed to Mosaic inbox ok=', ok, 'source=', source);
+        if (ok && fromInsertNext) {
+          FloatingToolbarBridge.deleteQueueFile(path).then(d =>
+            console.log('[INSERT-DBG/App] queue file delete result:', d)
+          );
+        }
+        return;
+      }
+
       if (PluginNoteAPI) {
         console.log('[INSERT-DBG/App] calling PluginNoteAPI.insertImage');
         try {
@@ -576,8 +589,8 @@ function App(): React.JSX.Element {
 
           try {
             await PluginCommAPI.reloadFile();
-            await new Promise(resolve => setTimeout(resolve, 300));
-
+            
+            
             const pad = 5;
             const lassoRect = {
               left: textLink.rect.left - pad,
@@ -591,8 +604,8 @@ function App(): React.JSX.Element {
             const lr: any = await PluginCommAPI.lassoElements(lassoRect);
             console.log('[App] lassoElements result:', JSON.stringify(lr));
             if (lr?.success && lr.result !== false) {
-              console.log('[App] lassoElements succeeded, calling setLassoBoxState(0)');
-              await (PluginCommAPI as any).setLassoBoxState?.(0);
+              const shown: any = await (PluginCommAPI as any).setLassoBoxState?.(0);
+              console.log('[App] lassoElements succeeded, setLassoBoxState(0) result:', JSON.stringify(shown));
             } else {
               console.warn('[App] lassoElements did not select: success=', lr?.success, 'result=', lr?.result);
             }
@@ -621,7 +634,8 @@ function App(): React.JSX.Element {
         if (res.result.length > 0) return { ok: true, els: res.result };
         console.log(`[PLT/${tag}] getElements empty (attempt ${attempt + 1}) — page still reloading, retrying…`);
         for (const el of res.result) { try { el?.recycle?.(); } catch (_) {} }
-        await new Promise(r => setTimeout(r, 150));
+        
+        
       }
       console.warn(`[PLT/${tag}] getElements still empty after retries`);
       return { ok: true, els: [] };
@@ -648,6 +662,37 @@ function App(): React.JSX.Element {
       }
     }
 
+    async function reselectLasso(
+      rect: { left: number; top: number; right: number; bottom: number },
+      tag: string,
+    ): Promise<boolean> {
+      
+      
+      console.log(`[PLT/${tag}] reselect start rect=${JSON.stringify(rect)}`);
+      try {
+        const clamped = {
+          left: Math.max(0, Math.floor(rect.left)),
+          top: Math.max(0, Math.floor(rect.top)),
+          right: Math.ceil(rect.right),
+          bottom: Math.ceil(rect.bottom),
+        };
+        if (clamped.right - clamped.left < 2 || clamped.bottom - clamped.top < 2) {
+          console.warn(`[PLT/${tag}] reselect skipped: degenerate rect=${JSON.stringify(clamped)}`);
+          return false;
+        }
+        const lr: any = await PluginCommAPI.lassoElements(clamped);
+        console.log(`[PLT/${tag}] reselect lassoElements rect=${JSON.stringify(clamped)} ok=${lr?.success} result=${lr?.result}`);
+        if (lr?.success && lr.result !== false) {
+          const shown: any = await (PluginCommAPI as any).setLassoBoxState?.(0);
+          console.log(`[PLT/${tag}] reselect setLassoBoxState(0) ok=${shown?.success}`);
+          return true;
+        }
+      } catch (e) {
+        console.warn(`[PLT/${tag}] reselect failed (non-fatal):`, e);
+      }
+      return false;
+    }
+
     async function doPalette(
       elementNums: number[],
       penColor: number | null,
@@ -672,6 +717,11 @@ function App(): React.JSX.Element {
       const t0 = Date.now();
       const convertingToMarker = wantPenType && penType === MARKER_PT;
       const prefetchedHasMarker = !!prefetchedEls?.some(isMarkerStroke);
+      
+      
+      const wantUuids: string[] = (prefetchedEls ?? [])
+        .map((el: any) => el?.uuid)
+        .filter((u: any): u is string => typeof u === 'string' && u.length > 0);
       const hasMarkerSelection = !!hasMarker || prefetchedHasMarker || convertingToMarker;
       console.log(`[PLT/${tag}] START nums=${elementNums.length} color=${penColor} thick=${thickness} pt=${penType} prefetch=${!!prefetchedEls} marker=${hasMarkerSelection}`);
 
@@ -684,10 +734,38 @@ function App(): React.JSX.Element {
         }
         const filePath = fpRes.result;
         const pageNum = pgRes.result;
+        const isNoteFile = /\.note$/i.test(filePath);
+
+
+        let lassoRectBefore: { left: number; top: number; right: number; bottom: number } | null = null;
+        try {
+          const lrRes: any = await PluginCommAPI.getLassoRect();
+          if (lrRes?.success && lrRes.result && typeof lrRes.result.left === 'number') {
+            lassoRectBefore = {
+              left: lrRes.result.left, top: lrRes.result.top,
+              right: lrRes.result.right, bottom: lrRes.result.bottom,
+            };
+          }
+          console.log(`[PLT/${tag}] lassoRect before=${JSON.stringify(lassoRectBefore)}`);
+        } catch (e) {
+          console.warn(`[PLT/${tag}] getLassoRect failed (non-fatal):`, e);
+        }
+
+
+
+
+        try {
+          const closed: any = await (PluginCommAPI as any).setLassoBoxState?.(2);
+          console.log(`[PLT/${tag}] close lasso box before modify ok=${closed?.success}`);
+        } catch (e) {
+          console.warn(`[PLT/${tag}] setLassoBoxState(2) failed (non-fatal):`, e);
+        }
 
         let targets: any[] = [];
-        if (hasMarkerSelection) {
-          
+        let poolEls: any[] | null = null;
+
+        if (hasMarkerSelection || !isNoteFile) {
+
           if (prefetchedEls) {
             for (const el of prefetchedEls) { try { el?.recycle?.(); } catch (_) {} }
             prefetchRecycled = true;
@@ -698,26 +776,96 @@ function App(): React.JSX.Element {
           const fetched = await getElementsStable(pageNum, filePath, tag);
           if (!fetched.ok) return;
           ownedEls = fetched.els;
+          poolEls = fetched.els;
           const numSet = new Set(elementNums);
           targets = fetched.els.filter(
             (el: any) => el?.numInPage != null && numSet.has(el.numInPage) && (el.type === 0 || el.type === 700)
           );
         } else if (prefetchedEls) {
+          poolEls = prefetchedEls;
+          const numSet = new Set(elementNums);
           targets = prefetchedEls.filter(
-            (el: any) => el?.numInPage != null && (el.type === 0 || el.type === 700)
+            (el: any) => el?.numInPage != null && numSet.has(el.numInPage) && (el.type === 0 || el.type === 700)
           );
         } else {
           const fetched = await getElementsStable(pageNum, filePath, tag);
           if (!fetched.ok) return;
           ownedEls = fetched.els;
+          poolEls = fetched.els;
           const numSet = new Set(elementNums);
           targets = fetched.els.filter(
             (el: any) => el?.numInPage != null && numSet.has(el.numInPage) && (el.type === 0 || el.type === 700)
           );
         }
 
+        if (targets.length === 0 && ownedEls) {
+          
+          
+          
+          
+          
+          const uuidSet = new Set(wantUuids);
+          if (uuidSet.size > 0) {
+            targets = ownedEls.filter(
+              (el: any) => typeof el?.uuid === 'string' && uuidSet.has(el.uuid) && (el.type === 0 || el.type === 700)
+            );
+          }
+          const poolUuids = ownedEls.map((el: any) => `${el?.numInPage}:${String(el?.uuid).slice(0, 8)}`);
+          console.warn(
+            `[PLT/${tag}] nums stale -> uuid match ${targets.length}/${wantUuids.length} ` +
+            `want=${JSON.stringify(wantUuids.map((u) => u.slice(0, 8)))} pool=${JSON.stringify(poolUuids)}`
+          );
+
+          
+          
+          try {
+            const lrRes: any = await PluginCommAPI.getLassoRect();
+            const r = lrRes?.result;
+            if (lrRes?.success && r && typeof r.left === 'number' &&
+                (r.right - r.left) >= 2 && (r.bottom - r.top) >= 2) {
+              const rectAfter = { left: r.left, top: r.top, right: r.right, bottom: r.bottom };
+              console.log(`[PLT/${tag}] lassoRect after commit=${JSON.stringify(rectAfter)}`);
+              lassoRectBefore = rectAfter;
+            } else {
+              console.warn(`[PLT/${tag}] lassoRect after commit unusable: ${JSON.stringify(r)}`);
+            }
+          } catch (e) {
+            console.warn(`[PLT/${tag}] getLassoRect after commit failed (non-fatal):`, e);
+          }
+
+          
+          if (targets.length === 0 && lassoRectBefore) {
+            let freshNums: number[] = [];
+            try {
+              const lr: any = await PluginCommAPI.lassoElements(lassoRectBefore);
+              if (lr?.success && lr.result !== false) {
+                const fresh: any = await PluginCommAPI.getLassoElements();
+                if (fresh?.success && Array.isArray(fresh.result)) {
+                  freshNums = fresh.result
+                    .map((el: any) => el?.numInPage)
+                    .filter((n: any): n is number => typeof n === 'number');
+                  for (const el of fresh.result) { try { el?.recycle?.(); } catch (_) {} }
+                }
+              }
+              await (PluginCommAPI as any).setLassoBoxState?.(2);
+            } catch (e) {
+              console.warn(`[PLT/${tag}] re-lasso failed (non-fatal):`, e);
+            }
+            console.log(`[PLT/${tag}] re-lasso rect=${JSON.stringify(lassoRectBefore)} nums=${JSON.stringify(freshNums)}`);
+            if (freshNums.length > 0) {
+              const freshSet = new Set(freshNums);
+              targets = ownedEls.filter(
+                (el: any) => el?.numInPage != null && freshSet.has(el.numInPage) && (el.type === 0 || el.type === 700)
+              );
+            }
+          }
+        }
+
         if (targets.length === 0) {
-          console.log(`[PLT/${tag}] no targets`);
+          
+          
+          const pool = (poolEls ?? []).map((el: any) => `${el?.numInPage}:${el?.type}`);
+          console.warn(`[PLT/${tag}] no targets: want=${JSON.stringify(elementNums)} pool=${JSON.stringify(pool)}`);
           return;
         }
         console.log(`[PLT/${tag}] targets=${targets.length} page=${pageNum} +${Date.now() - t0}ms`);
@@ -729,7 +877,11 @@ function App(): React.JSX.Element {
           }
         }
 
-        const modRes: any = await modifyLiveElements(targets, pageNum);
+        
+        
+        const modRes: any = isNoteFile
+          ? await modifyLiveElements(targets, pageNum)
+          : await modifyFileElements(filePath, pageNum, targets);
         const modCount = Array.isArray(modRes?.result) ? modRes.result.length : -1;
         console.log(`[PLT/${tag}] live ok=${modRes?.success} modified=${modCount}/${targets.length} err=${modRes?.error?.message ?? ''} +${Date.now() - t0}ms`);
         if (!modRes?.success) {
@@ -738,6 +890,39 @@ function App(): React.JSX.Element {
           const got = new Set(Array.isArray(modRes.result) ? modRes.result : []);
           const skipped = targets.filter((el: any) => !got.has(el.numInPage)).map((el: any) => el.numInPage);
           console.warn(`[PLT/${tag}] host SKIPPED ${skipped.length} strokes: nums=${JSON.stringify(skipped)}`);
+        }
+
+        if (modRes?.success && !isNoteFile) {
+          
+          const rel: any = await PluginCommAPI.reloadFile();
+          console.log(`[PLT/${tag}] reloadFile ok=${rel?.success} +${Date.now() - t0}ms`);
+          
+          
+          
+          
+        }
+
+        if (modRes?.success) {
+          
+          try { FloatingToolbarBridge.paletteApplyFinished(); } catch (_) {}
+        }
+
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        if (modRes?.success) {
+          const reselected = isNoteFile && lassoRectBefore
+            ? await reselectLasso(lassoRectBefore, tag)
+            : false;
+          try { FloatingToolbarBridge.parkToolbarForLasso(reselected); } catch (_) {}
         }
         console.log(`[PLT/${tag}] DONE ${Date.now() - t0}ms`);
       } catch (e) {
@@ -773,6 +958,8 @@ function App(): React.JSX.Element {
         await doPalette(elementNums, penColor, thickness, penType, 'apply', prefetched ?? undefined, hasMarker);
       } catch (e) {
         console.error('[PLT/apply] CRASH:', e);
+      } finally {
+        FloatingToolbarBridge.paletteApplyFinished();
       }
     });
 

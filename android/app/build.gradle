@@ -194,6 +194,10 @@ dependencies {
 
     implementation("com.facebook.react:react-android")
 
+    
+    
+    compileOnly files("$rootDir/../node_modules/sn-plugin-lib/android/libs/plugincommonlib.aar")
+
     if (hermesEnabled.toBoolean()) {
         implementation("com.facebook.react:hermes-android")
     } else {

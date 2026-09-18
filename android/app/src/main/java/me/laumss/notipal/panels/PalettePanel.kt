@@ -700,8 +700,8 @@ class PalettePanel(
 
     private fun buildLowerSplitSection(): LinearLayout {
         val lower = LinearLayout(reactContext).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.TOP
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
             setPadding(0, dp(22), 0, dp(26))
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
@@ -712,7 +712,7 @@ class PalettePanel(
         val editorCol = LinearLayout(reactContext).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 0.5f)
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
         }
         penTypeLabel = TextView(reactContext).apply {
             textSize = sp(18f)
@@ -755,24 +755,6 @@ class PalettePanel(
         buildThicknessInline(thicknessControls)
         editorCol.addView(thicknessControls)
         lower.addView(editorCol)
-
-        lower.addView(View(reactContext).apply {
-            layoutParams = LinearLayout.LayoutParams(
-                dp(1.5f), LinearLayout.LayoutParams.MATCH_PARENT
-            ).apply {
-                topMargin = dp(2)
-                bottomMargin = dp(2)
-            }
-            setBackgroundColor(LINE2)
-        })
-
-        val snapshotCol = LinearLayout(reactContext).apply {
-            orientation = LinearLayout.VERTICAL
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 0.5f)
-            setPadding(dp(18), 0, dp(24), 0)
-            addView(buildSnapshotSection())
-        }
-        lower.addView(snapshotCol)
 
         return lower
     }
@@ -1225,9 +1207,9 @@ class PalettePanel(
             
             putBoolean("hasMarkerStroke", hasMarkerStroke)
         }
-        toolbarModule.emitEvent("paletteApply", map)
+        toolbarModule.beginPaletteApply()
         hide()
-        toolbarModule.restoreToolbar()
+        toolbarModule.emitEvent("paletteApply", map)
     }
 
     private fun closeAndRestore() {

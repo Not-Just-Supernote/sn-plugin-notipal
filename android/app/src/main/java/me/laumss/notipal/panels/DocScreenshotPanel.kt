@@ -225,11 +225,13 @@ class DocScreenshotPanel(
 
     private fun doInsert() {
         val path = selectedPath ?: return
-        
-        
-        FloatingToolbarModule.beginInsertImageGuard()
         hide()
-        if (BuildConfig.ENABLE_DEBUG) Log.i(tag, "[INSERT-DBG/Kt] panel insert path=$path fromQueue=${activeTab == "queue"}")
+        if (BuildConfig.ENABLE_DEBUG) Log.i(tag, "[INSERT-DBG/Kt] panel insert path=$path fromQueue=${activeTab == "queue"} mosaic=${MosaicLink.isBoardVisible()}")
+        if (MosaicLink.isBoardVisible()) {
+            toolbar.enqueueImageToMosaic(path, "inkling-doc-screenshot")
+            return
+        }
+        FloatingToolbarModule.beginInsertImageGuard()
         thread(isDaemon = true) {
             ImagePanel.saveToInsertCacheStatic(
                 path, FloatingToolbarModule.lastNotePath, FloatingToolbarModule.lastPageNum

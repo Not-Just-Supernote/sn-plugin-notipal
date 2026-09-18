@@ -51,7 +51,7 @@ const FloatingBubbleBridge = {
     screenY: number; pageY: number;
     screenX: number; pageX: number;
     screenBottomY: number; pageBottomY: number;
-    bubbleHeight: number;
+    bubbleHeight: number; bubbleWidth: number;
   }) => void): { remove(): void } {
     const em = getBubbleEmitter();
     if (!em) return { remove() {} };
@@ -69,6 +69,7 @@ const FloatingBubbleBridge = {
         screenBottomY: event?.screenBottomY ?? event?.screenY ?? 0,
         pageBottomY: pbY,
         bubbleHeight: bh,
+        bubbleWidth: event?.bubbleWidth ?? 0,
       });
     });
   },

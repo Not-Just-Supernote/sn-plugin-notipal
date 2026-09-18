@@ -8,5 +8,6 @@ interface ToolbarHost {
     val screenH: Int
     fun refreshScreenDimensions()
     fun restoreToolbar()
+    fun beginPaletteApply()
     fun emitEvent(name: String, params: WritableMap)
 }

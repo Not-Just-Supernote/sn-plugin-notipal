@@ -54,6 +54,8 @@ const STRINGS = {
   bubble_insert_done:     { zh: '已插入',         en: 'Inserted' },
   bubble_ai_timeout:      { zh: 'AI 无响应，请检查中转站', en: 'AI timed out · check the relay' },
 
+  bubble_mosaic_ready:    { zh: '等待文本…点此放卡片', en: 'Waiting for text… tap to place card' },
+  bubble_mosaic_pending:  { zh: '已收到文本，点此创建卡片', en: 'Text received · tap to create card' },
   note_switched_stop:     { zh: '笔记已切换，文本接收已停止', en: 'Note switched, text receiving stopped' },
   pages_changed_stop:     { zh: '页面结构变更，文本接收已停止', en: 'Page structure changed, text receiving stopped' },
 

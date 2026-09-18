@@ -39,13 +39,28 @@ import kotlin.math.roundToInt
 class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     ReactContextBaseJavaModule(reactContext), me.laumss.notipal.ui_common.ToolbarHost {
 
+    internal enum class MosaicPermissionResult {
+        GRANTED,
+        DENIED,
+        PLUGIN_UNAVAILABLE,
+    }
+
     override fun getName() = "FloatingToolbar"
 
     override val screenW: Int get() = screenWidth
     override val screenH: Int get() = screenHeight
 
-    override fun getConstants(): MutableMap<String, Any> =
-        mutableMapOf("ENABLE_DEBUG" to BuildConfig.ENABLE_DEBUG)
+    override fun getConstants(): MutableMap<String, Any> {
+        val model = Build.MODEL.lowercase()
+        val (w, h) = when {
+            model.contains("a6 x") || model.contains("a6x") -> 1404 to 1872
+            model.contains("a5 x") || model.contains("a5x") -> 1920 to 2560
+            model.contains("nomad") -> 1920 to 2560
+            else -> 1920 to 2560
+        }
+        return mutableMapOf("ENABLE_DEBUG" to BuildConfig.ENABLE_DEBUG,
+            "PAGE_WIDTH" to w, "PAGE_HEIGHT" to h)
+    }
 
     companion object {
         private const val TAG = "FloatingToolbar"
@@ -95,6 +110,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         @Volatile private var docMode = false
         @Volatile private var loadedDocMode: Boolean? = null
         @Volatile private var toolbarSessionActive = false
+        @Volatile private var mosaicMode = false
 
         private val LATCHING_ACTIONS: Set<String> = setOf(
             "insert_text", "text_recv_nospacing", "text_recv_paragraph", "ai_relay"
@@ -151,6 +167,10 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         )
 
         private val NOTE_ONLY_TOOL_IDS = setOf("insert_image", "insert_link")
+
+        private val MOSAIC_TOOL_IDS = setOf(
+            "insert_image", "insert_doc_screenshot", SMART_LASSO_TOOL_ID, AI_RELAY_TOOL_ID,
+        )
 
         private val TOOL_CATALOG_IDS = setOf(
             "insert_image",
@@ -285,6 +305,9 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         @JvmStatic
         fun isDocMode(): Boolean = docMode
 
+        @JvmStatic
+        fun isMosaicMode(): Boolean = mosaicMode
+
         @Volatile @JvmStatic
         private var isPluginHostWindowShowing = false
 
@@ -367,8 +390,10 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                     if (open) {
                         if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "host lasso menu full-screen=true")
                         FloatingPenGuard.setFullScreenActive(true, "host-lasso-menu")
-                        
+
                         endInsertImageGuard()
+
+                        endPaletteApplyGuard()
                     } else {
                         
                         
@@ -380,15 +405,18 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                             lassoFullScreenReleaseRunnable,
                             LASSO_RELEASE_GRACE_MS
                         )
-                        
+
                         endInsertImageGuard()
-                        
-                        
-                        
+
+                        endPaletteApplyGuard()
+
+
+
                         scheduleRestore(RESTORE_DELAY_NORMAL, "lasso menu closed")
                     }
                 }
             }
+
             override fun onNativePenAreasChanged(rects: List<Rect>, generation: Int) {
                 if (!SubviewLogMonitor.isCurrentGeneration(generation)) return
                 val isWritableReset = rects.size == 1 && rects[0].let {
@@ -513,17 +541,19 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
 
             override fun onHostFullScreenDisableArea(generation: Int) {
                 if (!SubviewLogMonitor.isCurrentGeneration(generation)) return
-                
-                
-                
-                
-                if (insertImageFlowActive) {
-                    monitorHandler.removeCallbacks(insertGuardTimeoutRunnable)
-                    monitorHandler.postDelayed(insertGuardTimeoutRunnable, INSERT_PLACEMENT_TIMEOUT_MS)
-                }
                 if (rotationEpoch == 0L) scheduleGuardReassert("host pen table rebuild")
                 
                 else FloatingPenGuard.reassert("rotation full-screen hold (host rebuild)")
+            }
+
+            override fun onDocWriteAreaRebuilt(generation: Int) {
+                if (!SubviewLogMonitor.isCurrentGeneration(generation)) return
+                monitorHandler.post { onDocWriteAreaRebuiltLocked() }
+            }
+
+            override fun onDocLassoReleased(reason: String, generation: Int) {
+                if (!SubviewLogMonitor.isCurrentGeneration(generation)) return
+                monitorHandler.post { releaseDocStickerHold(reason) }
             }
 
             override fun onOwnedRotationDialogChanged(
@@ -583,32 +613,24 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         private var insertPlacementResetSeen = false
 
         @JvmStatic
-        private val insertGuardTimeoutRunnable = Runnable {
-            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "insert-image guard timeout release")
-            FloatingPenGuard.setFullScreenActive(false, "insert-image")
-            if (insertImageFlowActive) {
-                insertImageFlowActive = false
-                scheduleRestore(RESTORE_DELAY_NORMAL, "insert-image timeout")
-            }
-        }
-
-        
-        @JvmStatic
         internal fun beginInsertImageGuard() {
             FloatingPenGuard.setFullScreenActive(true, "insert-image")
             insertImageFlowActive = true
             insertPlacementResetSeen = false
-            monitorHandler.removeCallbacks(insertGuardTimeoutRunnable)
-            monitorHandler.postDelayed(insertGuardTimeoutRunnable, INSERT_GUARD_TIMEOUT_MS)
         }
 
-        
+
+        @JvmStatic
+        private fun endPaletteApplyGuard() {
+            FloatingPenGuard.setFullScreenActive(false, "palette-apply")
+        }
+
+
         @JvmStatic
         private fun endInsertImageGuard() {
             if (!insertImageFlowActive) return
             insertImageFlowActive = false
             insertPlacementResetSeen = false
-            monitorHandler.removeCallbacks(insertGuardTimeoutRunnable)
             FloatingPenGuard.setFullScreenActive(false, "insert-image")
         }
 
@@ -636,17 +658,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             }
         }
 
-        @JvmStatic
-        private val guardReassertRunnable = Runnable {
-            val reason = pendingGuardReassertReason
-            val active = FloatingPenGuard.hasActiveRects()
-            if (BuildConfig.ENABLE_DEBUG) {
-                Log.i(TAG, "guard reassert fired reason=$reason active=$active " +
-                    "guard=${FloatingPenGuard.debugState()}")
-            }
-            FloatingPenGuard.reassert(reason)
-        }
-
         
         @JvmStatic
         private val guardReassertFollowupRunnable = Runnable {
@@ -665,6 +676,69 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             )
             monitorHandler.removeCallbacks(guardReassertFollowupRunnable)
             monitorHandler.postDelayed(guardReassertFollowupRunnable, FOREGROUND_REASSERT_FOLLOWUP_MS)
+        }
+
+        
+        
+        
+        
+        
+        
+        
+        private const val DOC_STICKER_OWNER = "doc-sticker-transition"
+        
+        private const val DOC_STICKER_HOLD_MAX_MS = 120_000L
+        
+        private const val DOC_STICKER_ENTER_WINDOW_MS = 1_500L
+
+        @Volatile @JvmStatic
+        private var docStickerHoldArmedAt = 0L
+
+        @JvmStatic
+        private val docStickerHoldTimeoutRunnable = Runnable { releaseDocStickerHold("timeout") }
+
+        
+        @JvmStatic
+        private fun armDocStickerHold(reason: String) {
+            docStickerHoldArmedAt = android.os.SystemClock.elapsedRealtime()
+            monitorHandler.removeCallbacks(docStickerHoldTimeoutRunnable)
+            monitorHandler.postDelayed(docStickerHoldTimeoutRunnable, DOC_STICKER_HOLD_MAX_MS)
+            FloatingPenGuard.setFullScreenActive(true, DOC_STICKER_OWNER)
+            Log.i(TAG, "doc sticker hold armed reason=$reason")
+        }
+
+        
+        @JvmStatic
+        private fun onDocWriteAreaRebuiltLocked() {
+            val armedAt = docStickerHoldArmedAt
+            if (armedAt == 0L) return
+            val elapsed = android.os.SystemClock.elapsedRealtime() - armedAt
+            if (elapsed < DOC_STICKER_ENTER_WINDOW_MS) {
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "doc sticker hold: enter write-area (+${elapsed}ms), keep")
+                return
+            }
+            releaseDocStickerHold("doc write-area rebuilt after transition (+${elapsed}ms)")
+        }
+
+        
+        @JvmStatic
+        private fun releaseDocStickerHold(reason: String) {
+            if (docStickerHoldArmedAt == 0L) return
+            docStickerHoldArmedAt = 0L
+            monitorHandler.removeCallbacks(docStickerHoldTimeoutRunnable)
+            FloatingPenGuard.setFullScreenActive(false, DOC_STICKER_OWNER)
+            Log.i(TAG, "doc sticker hold released reason=$reason")
+        }
+
+        @JvmStatic
+        private val guardReassertRunnable = Runnable {
+            val reason = pendingGuardReassertReason
+            val active = FloatingPenGuard.hasActiveRects()
+            if (BuildConfig.ENABLE_DEBUG) {
+                Log.i(TAG, "guard reassert fired reason=$reason active=$active " +
+                    "guard=${FloatingPenGuard.debugState()}")
+            }
+            FloatingPenGuard.reassert(reason)
         }
 
         
@@ -914,11 +988,8 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 
                 
                 
-                if (rootView == null && !anyNativeOverlayOwnsScreen()) {
-                    FloatingPenGuard.dropIdleGuardState(
-                        if (showing) "host visible, Inkling module unavailable"
-                        else "host hidden, Inkling module unavailable"
-                    )
+                if (rootView == null && !anyNativeOverlayOwnsScreen() && showing) {
+                    FloatingPenGuard.reassert("host visible, module unavailable")
                 }
                 
                 
@@ -979,6 +1050,17 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         }
 
         @JvmStatic
+        internal fun onMosaicVisibilityChanged(visible: Boolean) {
+            if (mosaicMode == visible && rootView != null) return
+            mosaicMode = visible
+            val inst = currentInstance ?: return
+            monitorHandler.postDelayed(
+                { if (currentInstance === inst && mosaicMode == visible) inst.rebuildForMosaic(visible) },
+                RESTORE_DELAY_SHORT,
+            )
+        }
+
+        @JvmStatic
         private val deniedPluginPermissions: MutableSet<String> =
             java.util.Collections.synchronizedSet(mutableSetOf())
 
@@ -1016,10 +1098,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         private const val LASSO_RELEASE_GRACE_MS = 300L
         
         
-        private const val INSERT_GUARD_TIMEOUT_MS = 2500L
-        
-        
-        private const val INSERT_PLACEMENT_TIMEOUT_MS = 30_000L
         private const val ROTATION_DISPLAY_SETTLE_MS = 250L
         private const val ROTATION_BASELINE_STABLE_MS = 180L
         private const val ROTATION_DIALOG_RETRY_MS = 800L
@@ -1281,6 +1359,18 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "evaluateRestore[$reason]: blocked, toolbar menu open")
                 return
             }
+            
+            
+            if (mosaicMode && MosaicLink.isBoardVisible()) {
+                inst.resumeAllNativePanels()
+                if (!anyNativeOverlayOwnsScreen() && rootView == null) {
+                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "evaluateRestore[$reason]: rebuilding mosaic toolbar")
+                    inst.rebuildForMosaic(true)
+                }
+                toolbarRestorePending = false
+                FloatingPenGuard.endPark("restore evaluated[$reason] (mosaic)")
+                return
+            }
             if (isPluginHostWindowShowing) {
                 if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "evaluateRestore[$reason]: blocked, PluginHost showing")
                 return
@@ -1356,6 +1446,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             toolbarHostCloseGeneration = -1L
         }
         lastReactContext = reactApplicationContext
+        MosaicLink.ensureRegistered(reactApplicationContext)
         restoreBootstrapPending = false
         restoreBootstrapRunnable?.let { monitorHandler.removeCallbacks(it) }
         restoreBootstrapRunnable = null
@@ -1436,6 +1527,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             currentInstance = null
             foregroundMonitorRunning = false
             monitorHandler.removeCallbacks(staticMonitorRunnable)
+            releaseDocStickerHold("module invalidated")
             
             
             
@@ -1616,6 +1708,8 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     }
 
     private val CLIP_ICON_DP = 32
+    
+    private val VERTICAL_CLIP_COUNT = 3
     private val CLIP_RADIUS_DP = 3
     private val LAYER_BTN_DP = 20
     private var clipIconViews: Array<TextView?> = arrayOfNulls(6)
@@ -1693,7 +1787,9 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 }
                 removeAll()
             }
-            val active = attachedRoot != null
+
+
+            val active = attachedRoot != null || toolbarRestorePending
             Log.i(TAG, "toggleFromPluginButton active=$active requestedDocMode=$requestedDocMode " +
                 "rootAttached=${attachedRoot != null} pendingShow=$pendingShow " +
                 "toolbarRestorePending=$toolbarRestorePending")
@@ -1854,6 +1950,28 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    internal fun rebuildForMosaic(visible: Boolean) {
+        if (!hasToolbarSession()) return
+        if (configPanelBlocksToolbar()) return
+        tools.clear()
+        if (!visible) {
+            markToolbarForRestore()
+            removeAll()
+            
+            
+            
+            ensureToolsLoaded()
+            scheduleRestore(RESTORE_DELAY_SHORT, "mosaic closed")
+            return
+        }
+        ensureToolsLoaded()
+        toolbarRestorePending = false
+        cancelScheduledRestore()
+        removeAll()
+        if (collapsed) createCollapsedHandle() else { pendingShow = true; createExpandedToolbar() }
+        Log.i(TAG, "toolbar rebuilt for mosaic canvas tools=${tools.size}")
+    }
+
     private fun showToolbarNow(requestedDocMode: Boolean? = null) {
         
         monitorHandler.removeCallbacks(configFallbackRunnable)
@@ -1920,7 +2038,28 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 if (!hidden && tools.none { it.id == item.id }) tools.add(item)
             }
         }
+        if (mosaicMode) {
+            tools.retainAll { it.id in MOSAIC_TOOL_IDS }
+            ensureMosaicCanvasTools()
+        }
         appendMissingUtilityTools()
+    }
+
+    
+    private fun ensureMosaicCanvasTools() {
+        val present = tools.mapTo(mutableSetOf()) { it.id }
+        val catalog = listOf(
+            Triple("insert_image", "Im", "config_tool_image"),
+            Triple("insert_doc_screenshot", "Sc", "config_tool_doc"),
+            Triple(SMART_LASSO_TOOL_ID, "AI", "config_tool_smart_lasso"),
+            Triple(AI_RELAY_TOOL_ID, "Vc", "config_tool_ai_relay"),
+        )
+        for ((id, icon, nameKey) in catalog) {
+            if (id in present) continue
+            val item = ToolItem(id, NativeLocale.t(nameKey), icon, id, nameKey = nameKey)
+            if (id == "insert_image") tools.add(0, item) else tools.add(item)
+            present.add(id)
+        }
     }
 
     private fun appendMissingUtilityTools() {
@@ -1971,6 +2110,61 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
 
     @ReactMethod(isBlockingSynchronousMethod = true)
     fun isShowingSync(): Boolean = rootView?.isAttachedToWindow == true
+
+    
+    @ReactMethod(isBlockingSynchronousMethod = true)
+    fun isMosaicBoardVisible(): Boolean = MosaicLink.isBoardVisible()
+
+    
+    @ReactMethod
+    fun requestMosaicPasteStrokes() {
+        MosaicLink.requestPasteStrokes(reactApplicationContext)
+    }
+
+    
+    @ReactMethod
+    fun requestMosaicClearSelection(delete: Boolean) {
+        MosaicLink.requestClearSelection(reactApplicationContext, delete)
+    }
+
+    
+    @ReactMethod
+    fun requestMosaicTextCard(text: String, anchorScreenX: Int, anchorScreenY: Int) {
+        MosaicLink.requestTextCard(reactApplicationContext, text, anchorScreenX, anchorScreenY)
+    }
+
+    
+    @ReactMethod
+    fun enqueueMosaicImage(path: String, source: String, promise: Promise) {
+        kotlin.concurrent.thread(isDaemon = true) {
+            val ok = MosaicLink.enqueueImage(path, source)
+            promise.resolve(ok)
+        }
+    }
+
+    
+    internal fun enqueueImageToMosaic(path: String, source: String, after: (() -> Unit)? = null) {
+        kotlin.concurrent.thread(isDaemon = true) {
+            val ok = MosaicLink.enqueueImage(path, source)
+            if (BuildConfig.ENABLE_DEBUG) {
+                Log.i(TAG, "[INSERT-DBG/Kt] enqueueImageToMosaic ok=$ok source=$source path=$path")
+            }
+            handler.post {
+                after?.invoke()
+                restoreToolbar()
+            }
+        }
+    }
+
+    
+    @ReactMethod
+    fun notifyStickerInserted() {
+        if (!docMode) {
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "notifyStickerInserted: note mode, lasso-menu owner covers it")
+            return
+        }
+        monitorHandler.post { armDocStickerHold("sticker inserted (doc)") }
+    }
 
     @ReactMethod
     fun checkPendingOpenMain(promise: Promise) {
@@ -2271,7 +2465,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
 
     
     internal fun requestMosaicPluginPermissions(
-        onResult: ((Boolean) -> Unit)? = null,
+        onResult: ((MosaicPermissionResult) -> Unit)? = null,
     ) {
         handler.post {
             try {
@@ -2281,7 +2475,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                     it.name == "getInstance" && it.parameterCount == 0
                 }?.invoke(null) ?: run {
                     if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "Mosaic permission: host manager unavailable")
-                    onResult?.invoke(false)
+                    onResult?.invoke(MosaicPermissionResult.DENIED)
                     return@post
                 }
                 val getPluginApp = managerClass.methods.firstOrNull {
@@ -2289,12 +2483,12 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                         it.parameterTypes[0] == String::class.java
                 } ?: run {
                     if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "Mosaic permission: getPluginApp unavailable")
-                    onResult?.invoke(false)
+                    onResult?.invoke(MosaicPermissionResult.PLUGIN_UNAVAILABLE)
                     return@post
                 }
                 val mosaicApp = getPluginApp.invoke(manager, MOSAIC_PLUGIN_ID) ?: run {
                     if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "Mosaic permission: plugin not installed")
-                    onResult?.invoke(false)
+                    onResult?.invoke(MosaicPermissionResult.PLUGIN_UNAVAILABLE)
                     return@post
                 }
 
@@ -2306,7 +2500,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                     NativeLocale.t("mosaic_permission_request"),
                 ) { readGranted ->
                     if (!readGranted) {
-                        onResult?.invoke(false)
+                        onResult?.invoke(MosaicPermissionResult.DENIED)
                         return@requestHostPluginPermission
                     }
                     requestHostPluginPermission(
@@ -2316,14 +2510,14 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                         PLUGIN_FILE_WRITE_PERMISSION,
                         NativeLocale.t("mosaic_permission_request"),
                     ) { writeGranted ->
-                        onResult?.invoke(writeGranted)
+                        onResult?.invoke(if (writeGranted) MosaicPermissionResult.GRANTED else MosaicPermissionResult.DENIED)
                     }
                 }
             } catch (e: Exception) {
                 if (BuildConfig.ENABLE_DEBUG) {
                     Log.e(TAG, "Mosaic permission check failed: ${e.message}", e)
                 }
-                onResult?.invoke(false)
+                onResult?.invoke(MosaicPermissionResult.DENIED)
             }
         }
     }
@@ -2411,10 +2605,11 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    internal fun showMosaicPermissionReminder() {
+    internal fun showMosaicPermissionReminder(result: MosaicPermissionResult) {
+        val messageKey = if (result == MosaicPermissionResult.PLUGIN_UNAVAILABLE) "mosaic_plugin_needed" else "mosaic_permission_needed"
         Dialog.confirmResult(
             reactApplicationContext,
-            NativeLocale.t("mosaic_permission_needed"),
+            NativeLocale.t(messageKey),
             NativeLocale.t("cancel"),
             NativeLocale.t("open_settings"),
         ) { openSettings ->
@@ -2669,6 +2864,15 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     }
 
     private fun callClosePluginView() = withNativePluginManager("callClosePluginView") { pm ->
+        
+        
+        
+        
+        
+        if (MosaicLink.isBoardVisible()) {
+            Log.i(TAG, "callClosePluginView skipped: Mosaic board owns PluginContainer")
+            return@withNativePluginManager
+        }
         notifySettingsClientClosed(pm)
         for (name in arrayOf("closePluginView", "hidePluginView")) {
             val methods = pm::class.java.methods.filter { it.name == name }
@@ -3194,11 +3398,15 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         
         
         val showClipboard = true
-        val showLayers = !docMode && actionToolCount >= 5
-        val showTextReceive = !docMode && actionToolCount >= 6
+        val showLayers = !docMode && !mosaicMode && actionToolCount >= 5
+        
+        
+        val showTextReceive = !docMode
         val showGotoNote = docMode
+        val showReturnNote = false
         val showCollapse = true
-        val hasSidebarItems = showClipboard || showLayers || showTextReceive || showGotoNote || showCollapse
+        val hasSidebarItems = showClipboard || showLayers || showTextReceive ||
+            showGotoNote || showReturnNote || showCollapse
         textReceiveBtn = null
         clipIconViews.fill(null)
 
@@ -3450,16 +3658,13 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
 
             dragSpacer = View(ctx)
 
-            val showAllVerticalClips = actionToolCount >= 7
-            if (showAllVerticalClips) clipPage = 0
-            val (visibleClipCount, clipOffset) = verticalClipWindow(actionToolCount)
+            val (visibleClipCount, clipOffset) = verticalClipWindow()
 
             var clipSwipeStartY = 0f
             var clipSwipeStartX = 0f
             var clipSwipeCaptured = false
             val clipCol = object : LinearLayout(ctx) {
                 override fun onInterceptTouchEvent(ev: android.view.MotionEvent): Boolean {
-                    if (showAllVerticalClips) return false
                     when (ev.action) {
                         android.view.MotionEvent.ACTION_DOWN -> {
                             clipSwipeStartX = ev.rawX
@@ -3488,7 +3693,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                     return false
                 }
                 override fun onTouchEvent(ev: android.view.MotionEvent): Boolean {
-                    if (showAllVerticalClips) return false
                     when (ev.action) {
                         android.view.MotionEvent.ACTION_UP -> {
                             if (clipSwipeCaptured) {
@@ -3551,7 +3755,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             if (showCollapse) {
                 titleCol.addView(makeSidebarSwapBtn(clipIconSz).apply {
                     (layoutParams as LinearLayout.LayoutParams).topMargin =
-                        if (showLayers || showTextReceive || showGotoNote) dpToPx(12) else dpToPx(2)
+                        if (showLayers || showTextReceive || showGotoNote || showReturnNote) dpToPx(12) else dpToPx(2)
                 })
             }
             bodyRow.addView(titleCol)
@@ -3589,7 +3793,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             }
             if (showClipboard) titleRow.addView(clipRow)
 
-            if (showClipboard && (showLayers || showTextReceive || showGotoNote || showCollapse)) {
+            if (showClipboard && (showLayers || showTextReceive || showGotoNote || showReturnNote || showCollapse)) {
                 titleRow.addView(View(ctx).apply {
                     setBackgroundColor(CLR_SEP)
                     layoutParams = LinearLayout.LayoutParams(dpToPx(1), (titleH * 0.6f).toInt()).apply {
@@ -4012,7 +4216,9 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         }
 
         
-        if (docMode && tool.action == "insert_doc_screenshot") {
+        
+        
+        if (docMode && !MosaicLink.isBoardVisible() && tool.action == "insert_doc_screenshot") {
             startDocScreenshotLasso()
             return
         }
@@ -4246,15 +4452,20 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
 
     override fun onCatalystInstanceDestroy() {
         if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "onCatalystInstanceDestroy — keeping toolbar alive (rootView=${rootView != null})")
+
+
+        endPaletteApplyGuard()
         super.onCatalystInstanceDestroy()
     }
 
     fun requestInsertImage(path: String) {
         if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[INSERT-DBG/Kt] requestInsertImage: $path (currentInstance=${currentInstance === this})")
         insertPluginViewClosed = false
+
+
         
         
-        beginInsertImageGuard()
+        if (!MosaicLink.isBoardVisible()) beginInsertImageGuard()
 
         handler.post {
             val retryDelays = longArrayOf(0, 300, 750)
@@ -4267,6 +4478,36 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                     })
                 }, delay)
             }
+        }
+    }
+
+    override fun beginPaletteApply() {
+        FloatingPenGuard.setFullScreenActive(true, "palette-apply")
+    }
+
+
+    @ReactMethod
+    fun paletteApplyFinished() {
+        endPaletteApplyGuard()
+        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "palette-apply guard released by JS")
+    }
+
+    
+    
+    
+    
+    
+    
+    @ReactMethod
+    fun parkToolbarForLasso(holdForSelection: Boolean) {
+        handler.post {
+            cancelScheduledRestore()
+            markToolbarForRestore()
+            if (rootView != null) removeAll()
+            if (BuildConfig.ENABLE_DEBUG) {
+                Log.i(TAG, "toolbar parked for palette apply hold=$holdForSelection pending=$toolbarRestorePending")
+            }
+            if (!holdForSelection) scheduleRestore(RESTORE_DELAY_NORMAL, "palette apply done (no selection)")
         }
     }
 
@@ -4411,6 +4652,10 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun showPalettePanel(infoJson: String) {
         handler.post {
+
+
+
+            markToolbarForRestore()
             removeAll()
             openNativePanel("palette") {
                 PalettePanel.getInstance(reactApplicationContext, this@FloatingToolbarModule).show(infoJson)
@@ -5101,7 +5346,8 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         handler.post {
             docScreenshotRoutePending = true
             if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[INSERT-DBG/Kt] doc screenshot route pending=true")
-            FloatingPenGuard.setFullScreenActive(true, "insert-image")
+            
+            if (!MosaicLink.isBoardVisible()) FloatingPenGuard.setFullScreenActive(true, "insert-image")
             markToolbarForRestore()
             removeAll()
             kotlin.concurrent.thread(isDaemon = true) {
@@ -5121,6 +5367,16 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                         val path = nextFile.absolutePath
                         if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[INSERT-DBG/Kt] handleDocScreenshot: insertNext=$path")
                         insertNextChainActive = true
+                        if (MosaicLink.isBoardVisible()) {
+                            
+                            enqueueImageToMosaic(path, "inkling-doc-screenshot") {
+                                DocScreenshotService.unmarkInsertNext(nextFile.name)
+                                try { nextFile.delete() } catch (_: Exception) {}
+                                insertNextChainActive = false
+                                docScreenshotRoutePending = false
+                            }
+                            return@post
+                        }
                         kotlin.concurrent.thread(isDaemon = true) {
                             ImagePanel.saveToInsertCacheStatic(path, lastNotePath, lastPageNum)
                         }
@@ -5312,6 +5568,13 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                             PenLassoOverlay.Action.OPEN_MOSAIC_CARD -> "mosaic"
                             PenLassoOverlay.Action.CANCEL -> return@show
                         }
+                        
+                        if (action == PenLassoOverlay.Action.OPEN_MOSAIC_CARD && MosaicLink.isBoardVisible()) {
+                            RegionCaptureFlow.capture(
+                                reactApplicationContext, this@FloatingToolbarModule,
+                                captureMode, fromBubble, l, t, r, b)
+                            return@show
+                        }
                         if (action == PenLassoOverlay.Action.ADD_TO_DOC_SCREENSHOTS ||
                             action == PenLassoOverlay.Action.OPEN_MOSAIC_CARD) {
                             requestScreenshotStoragePermissions(
@@ -5319,13 +5582,13 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                                     "insert region into Mosaic" else "save region to doc screenshots",
                                 onGranted = {
                                     if (action == PenLassoOverlay.Action.OPEN_MOSAIC_CARD) {
-                                        requestMosaicPluginPermissions { mosaicGranted ->
-                                            if (mosaicGranted) {
+                                        requestMosaicPluginPermissions { mosaicResult ->
+                                            if (mosaicResult == MosaicPermissionResult.GRANTED) {
                                                 RegionCaptureFlow.capture(
                                                     reactApplicationContext, this@FloatingToolbarModule,
                                                     captureMode, fromBubble, l, t, r, b)
                                             } else {
-                                                showMosaicPermissionReminder()
+                                                showMosaicPermissionReminder(mosaicResult)
                                                 RegionCaptureFlow.emitCloseAndRestore(
                                                     this@FloatingToolbarModule,
                                                     reactApplicationContext,
@@ -5364,6 +5627,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             }
         }
     }
+
 
     @ReactMethod
     fun showSendPanelFromBubble() {
@@ -5510,28 +5774,15 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         destroyAll()
     }
 
-    private fun verticalClipWindow(actionToolCount: Int): Pair<Int, Int> {
-        val count = when {
-            actionToolCount >= 7 -> 6
-            docMode -> 3
-            actionToolCount <= 4 -> 5
-            else -> 4
-        }
-        val offset = when {
-            actionToolCount >= 7 -> 0
-            docMode -> clipPage * 3
-            actionToolCount <= 4 -> clipPage
-            else -> clipPage * 2
-        }
-        return count to offset
-    }
+    
+    private fun verticalClipWindow(): Pair<Int, Int> =
+        VERTICAL_CLIP_COUNT to (clipPage * VERTICAL_CLIP_COUNT)
 
     private fun rebuildClipIcons() {
-        val actionToolCount = tools.count { !isToolbarUtilityTool(it.id) }
         val (count, offset) = if (orientation != "vertical") {
             6 to 0
         } else {
-            verticalClipWindow(actionToolCount)
+            verticalClipWindow()
         }
         for (vi in 0 until count) {
             val tv = clipIconViews[vi] ?: continue
@@ -5568,6 +5819,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             }
         } catch (_: Exception) {}
     }
+
 
     private fun runMonitorTick() {
         
@@ -5688,6 +5940,12 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         foregroundMonitorRunning = true
         isInNoteApp = true
 
+
+
+        endPaletteApplyGuard()
+        endInsertImageGuard()
+        FloatingPenGuard.setFullScreenActive(false, "insert-image")
+
         
         if (windowStateMonitor == null) {
             windowStateMonitor = WindowStateMonitor(reactApplicationContext)
@@ -5712,6 +5970,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         cancelRotationSync("foreground monitor stopped")
         foregroundMonitorRunning = false
         monitorHandler.removeCallbacks(staticMonitorRunnable)
+        releaseDocStickerHold("foreground monitor stopped")
         
         
         
@@ -5727,6 +5986,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         FloatingPenGuard.setFullScreenActive(false, "foreign-activity")
         endInsertImageGuard()
         FloatingPenGuard.setFullScreenActive(false, "insert-image")
+        endPaletteApplyGuard()
         docScreenshotRoutePending = false
         lassoWritableResetPending = false
         toolbarRestorePending = false
@@ -5740,9 +6000,11 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
 
     private val resumedActivityRegex = Regex("""mResumedActivity:.*?(\S+)/(\S+)\s""")
 
+    
     private fun foregroundActivity(): ForegroundActivity? {
         return try {
-            val proc = Runtime.getRuntime().exec(arrayOf("dumpsys", "activity", "activities"))
+            val bin = if (java.io.File("/system/bin/dumpsys").exists()) "/system/bin/dumpsys" else "dumpsys"
+            val proc = Runtime.getRuntime().exec(arrayOf(bin, "activity", "activities"))
             val reader = proc.inputStream.bufferedReader()
             var matched: MatchResult? = null
             reader.useLines { lines ->

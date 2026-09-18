@@ -73,6 +73,12 @@ let _aiPositionLocked = false;
 
 let _pendingCards: { text: string; source: TextSource }[] = [];
 
+
+
+
+let _mosaicTextActive = false;
+let _mosaicTextBuffer: string[] = [];
+
 let _switchVersion = 0;
 
 let _localSendStarted = false;
@@ -223,7 +229,7 @@ function _syncHeartbeat(): void {
 
 function _pushActiveModes(): void {
   const modes: string[] = [];
-  if (_activeMode) modes.push('insert_text');
+  if (_activeMode || _mosaicTextActive) modes.push('insert_text');
   if (_aiActive) {
     modes.push(TOOL_IDS.AI_RELAY);
   }
@@ -258,6 +264,14 @@ function reviveBridge(): void {
     if (_aiWaiting) {
       _aiWaiting = false;
       if (AiBubbleBridge.isAvailable) AiBubbleBridge.updateText(_aiReadyText());
+    }
+
+    
+    
+    
+    if (_mosaicTextEngaged() || _isMosaicBoard()) {
+      _stageMosaicText(text, 'broadcast');
+      return;
     }
 
     
@@ -335,6 +349,14 @@ async function handleRelayBlocks(
   if (_aiWaiting) {
     _aiWaiting = false;
     if (AiBubbleBridge.isAvailable) AiBubbleBridge.updateText(_aiReadyText());
+  }
+
+  
+  
+  if (_mosaicTextEngaged() || _isMosaicBoard()) {
+    const flat = (payload.text ?? '').trim();
+    if (flat.length > 0) _stageMosaicText(flat, 'broadcast');
+    return;
   }
 
   if (!_textInserter) return;
@@ -464,6 +486,108 @@ function showTextBubbleAtInsertion(anchor: InsertionAnchor): void {
   console.log('[BackgroundService]: show bubble at insertion origin=', JSON.stringify(anchor));
 }
 
+
+function _isMosaicBoard(): boolean {
+  try { return (FloatingToolbar as any)?.isMosaicBoardVisible?.() === true; } catch { return false; }
+}
+
+function _mosaicBubbleStatus(): string {
+  return _mosaicTextBuffer.length > 0 ? t('bubble_mosaic_pending') : t('bubble_mosaic_ready');
+}
+
+
+function _mosaicBubbleOwned(): boolean {
+  if (_mosaicTextActive) return true;
+  if (_mosaicTextBuffer.length === 0) return false;
+  if (_isMosaicBoard()) return true;
+  FileLogger.logEvent('MosaicText', `buffer dropped (board closed) pending=${_mosaicTextBuffer.length}`);
+  _mosaicTextBuffer = [];
+  return false;
+}
+
+
+function _refreshMosaicBubble(): void {
+  if (!FloatingBubbleBridge.isAvailable) return;
+  if (_mosaicTextActive || _mosaicTextBuffer.length > 0) {
+    FloatingBubbleBridge.setPending(_mosaicTextBuffer.length > 0);
+    FloatingBubbleBridge.show(_mosaicBubbleStatus(), 'nospacing');
+    return;
+  }
+  if (_activeMode) {
+    _syncTextBubblePending();
+    FloatingBubbleBridge.show(_getBubbleStatusText(), _activeMode);
+  } else {
+    FloatingBubbleBridge.setPending(false);
+    FloatingBubbleBridge.hide();
+  }
+}
+
+
+async function toggleMosaicTextMode(): Promise<boolean> {
+  if (_mosaicTextActive) {
+    stopMosaicTextMode();
+    return false;
+  }
+  
+  if (!await _ensureTextReceiverRuntime()) {
+    return false;
+  }
+  _mosaicTextActive = true;
+  _mosaicTextBuffer = [];
+  _pushActiveModes();
+  if (FloatingBubbleBridge.isAvailable) {
+    FloatingBubbleBridge.setPending(false);
+    FloatingBubbleBridge.show(_mosaicBubbleStatus(), 'nospacing');
+  }
+  FileLogger.logEvent('MosaicText', 'mode ON');
+  return true;
+}
+
+function stopMosaicTextMode(): void {
+  if (!_mosaicTextActive) return;
+  _mosaicTextActive = false;
+  _mosaicTextBuffer = [];
+  _pushActiveModes();
+  if (FloatingBubbleBridge.isAvailable) {
+    FloatingBubbleBridge.setPending(false);
+    FloatingBubbleBridge.hide();
+  }
+  FileLogger.logEvent('MosaicText', 'mode OFF');
+}
+
+
+function _mosaicTextEngaged(): boolean {
+  if (!_mosaicTextActive) return false;
+  if (_isMosaicBoard()) return true;
+  stopMosaicTextMode();
+  return false;
+}
+
+
+function _stageMosaicText(text: string, source: TextSource): void {
+  const trimmed = text ?? '';
+  if (trimmed.length === 0) return;
+  _mosaicTextBuffer.push(trimmed);
+  console.log('[BackgroundService]: staged mosaic text, source=', source,
+    'pending=', _mosaicTextBuffer.length);
+  FileLogger.logEvent('MosaicText', `staged source=${source} pending=${_mosaicTextBuffer.length}`);
+  _refreshMosaicBubble();
+}
+
+
+function _flushMosaicTextCard(d: {
+  screenX: number; screenBottomY: number; bubbleWidth: number;
+}): void {
+  if (_mosaicTextBuffer.length === 0) return;
+  const text = _mosaicTextBuffer.join('\n\n');
+  _mosaicTextBuffer = [];
+  const anchorX = Math.round(d.screenX + (d.bubbleWidth ?? 0));
+  const anchorY = Math.round(d.screenBottomY);
+  FloatingToolbarBridge.requestMosaicTextCard(text, anchorX, anchorY);
+  console.log('[BackgroundService]: mosaic text card sent anchor=', anchorX, anchorY, 'len=', text.length);
+  FileLogger.logEvent('MosaicText', `flush anchor=(${anchorX},${anchorY}) len=${text.length}`);
+  _refreshMosaicBubble();
+}
 
 function _stagePendingCard(text: string, source: TextSource): void {
   _pendingCards.push({ text, source });
@@ -763,7 +887,8 @@ export function ensureInit(): void {
       FileLogger.logTextReceived('LocalSend', info.text);
       if (info._pendingId) LocalSendBridge.ackPendingText(info._pendingId);
       
-      if (_activeMode) _stagePendingCard(info.text, 'localsend');
+      if (_mosaicTextEngaged()) _stageMosaicText(info.text, 'localsend');
+      else if (_activeMode) _stagePendingCard(info.text, 'localsend');
       else _textInserter?.enqueue(info.text, 'localsend');
     });
   }
@@ -782,6 +907,8 @@ export function ensureInit(): void {
       pageBottomY: number; bubbleHeight: number;
       screenY: number; screenBottomY: number;
     }, source: 'user-drag' | 'user-tap' | 'initial-layout') => {
+      
+      if (_mosaicBubbleOwned()) return;
       const bottomY = (data.pageBottomY > data.pageY) ? data.pageBottomY : data.pageY;
       const insertTop = bottomY + 4;
       const anchor = _textInserter?.setNextInsertionAnchor(insertTop, data.pageX, source);
@@ -791,6 +918,11 @@ export function ensureInit(): void {
     };
 
     FloatingBubbleBridge.onTap((d) => {
+      if (_mosaicBubbleOwned()) {
+        console.log('[BackgroundService]: mosaic text bubble tapped, pending=', _mosaicTextBuffer.length);
+        _flushMosaicTextCard(d);
+        return;
+      }
       console.log('[BackgroundService]: text bubble tapped, pending=', _pendingCards.length);
       _aiPositionLocked = false;
       _flushPendingCards(() => applyBubblePosition(d, 'user-tap')).catch(e =>
@@ -798,6 +930,14 @@ export function ensureInit(): void {
     });
 
     FloatingBubbleBridge.onLongPress(() => {
+      if (_mosaicBubbleOwned()) {
+        if (_mosaicTextBuffer.length > 0) {
+          _mosaicTextBuffer = [];
+          FileLogger.logEvent('MosaicText', 'buffer cleared (long press)');
+          _refreshMosaicBubble();
+        }
+        return;
+      }
       const armed = _pendingCards.length > 0
         || (_textInserter?.isWaitingForPageTap() ?? false);
       if (armed) _clearTextReceiveQueueFromBubble();
@@ -1029,6 +1169,10 @@ export function isAiActive(): boolean {
 
 export async function toggleMode(target: InsertMode): Promise<InsertMode | null> {
   ensureInit();
+  
+  if (_isMosaicBoard()) {
+    return (await toggleMosaicTextMode()) ? target : null;
+  }
   if (!_textInserter) return null;
 
   const cur = _activeMode;
@@ -1088,21 +1232,12 @@ export async function startAiReceiveMode(): Promise<void> {
   _currentCapsuleDetailId = null;
   if (AiBubbleBridge.isAvailable) AiBubbleBridge.setInboxItems([]);
   try { AIRelayModule?.sendAlive?.(); } catch (_) {}
-  if (_aiActive) {
-    
-    
-    if (AiBubbleBridge.isAvailable) {
-      if (_relayEnabled) showAiBubble(_aiReadyText());
-      else AiBubbleBridge.showCollapsed(t('bubble_relay_off'));
-    }
-    return;
+  if (!_aiActive) {
+    _aiActive = true;
+    reviveBridge();
+    _pushActiveModes();
   }
-  _aiActive = true;
-  reviveBridge();
-  _pushActiveModes();
-  
-  
-  if (AiBubbleBridge.isAvailable) AiBubbleBridge.showCollapsed(t('bubble_relay_off'));
+  await _startAirRelayAndExpand();
 }
 
 export function stopAiMode(): void {
@@ -1240,9 +1375,17 @@ export async function handleAiSend(): Promise<void> {
 
   try {
 
-    let extracted = await LassoExtractor.consumeWarmed(onProgress);
-    if (!extracted) {
-      extracted = await LassoExtractor.extract(onProgress);
+    let extracted: any;
+    const mosaicBoard = _isMosaicBoard();
+    if (mosaicBoard) {
+      
+      
+      const { extractMosaicLassoText } = require('./ToolActions');
+      const mosaicText = await extractMosaicLassoText(onProgress);
+      extracted = { text: mosaicText ?? '', imagePaths: [], linkedFiles: [], lassoRect: null };
+    } else {
+      const warmed = await LassoExtractor.consumeWarmed(onProgress);
+      extracted = warmed ?? await LassoExtractor.extract(onProgress);
     }
     if (!extracted.text) {
       FileLogger.logEvent('AiSendAbort', 'no text');
@@ -1272,14 +1415,17 @@ export async function handleAiSend(): Promise<void> {
 
     reviveBridge();
 
-    try {
-      await Promise.race([
-        (PluginCommAPI.setLassoBoxState as any)(2),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('setLassoBoxState timeout')), 3000)),
-      ]);
-      console.log('[BackgroundService]: lasso selection cleared');
-    } catch (e) {
-      console.warn('[BackgroundService]: setLassoBoxState failed (non-fatal):', e);
+    
+    if (!mosaicBoard) {
+      try {
+        await Promise.race([
+          (PluginCommAPI.setLassoBoxState as any)(2),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('setLassoBoxState timeout')), 3000)),
+        ]);
+        console.log('[BackgroundService]: lasso selection cleared');
+      } catch (e) {
+        console.warn('[BackgroundService]: setLassoBoxState failed (non-fatal):', e);
+      }
     }
 
     const anchorRect = extracted.lassoRect ?? extracted.lastTextBoxRect;
@@ -1287,7 +1433,7 @@ export async function handleAiSend(): Promise<void> {
     
     
     
-    if (_textInserter && _textInserter.isRunning()) {
+    if (!mosaicBoard && _textInserter && _textInserter.isRunning()) {
       try {
         const pgRes: any = await PluginCommAPI.getCurrentPageNum();
         if (pgRes?.success && typeof pgRes.result === 'number'
@@ -1301,7 +1447,7 @@ export async function handleAiSend(): Promise<void> {
       }
     }
 
-    if (_textInserter) {
+    if (!mosaicBoard && _textInserter) {
       let insertionAnchor: InsertionAnchor | null = null;
       let startedHere = false;
 
@@ -1565,7 +1711,8 @@ export async function flushPendingTexts(): Promise<number> {
       for (const info of localSendTexts) {
         FileLogger.logTextReceived('LocalSend', info.text);
         if (info._pendingId) LocalSendBridge.ackPendingText(info._pendingId);
-        if (_activeMode) _stagePendingCard(info.text, 'localsend');
+        if (_mosaicTextEngaged()) _stageMosaicText(info.text, 'localsend');
+        else if (_activeMode) _stagePendingCard(info.text, 'localsend');
         else _textInserter.enqueue(info.text, 'localsend');
       }
       FileLogger.logEvent('FlushPendingLocalSend', `count=${localSendTexts.length}`);

@@ -33,6 +33,9 @@ object SubviewLogMonitor {
         "HandWritePresenter:V",
         "RattaSnNoteLib:I",      
         "PagingView:I",          
+        
+        
+        "Document:D",
     )
 
     interface Listener {
@@ -54,6 +57,12 @@ object SubviewLogMonitor {
 
         
         fun onHostFullScreenDisableArea(generation: Int)
+
+        
+        fun onDocWriteAreaRebuilt(generation: Int)
+
+        
+        fun onDocLassoReleased(reason: String, generation: Int)
     }
 
     
@@ -377,8 +386,13 @@ object SubviewLogMonitor {
 
     
     private fun handleLine(myGen: Int, line: String) {
+        
+        
+        
+        if (isForeignDialogLine(line)) return
         if (handleNativePenAreaLine(myGen, line)) return
         if (handleOwnedRotationDialogLine(myGen, line)) return
+        if (handleDocLassoLine(myGen, line)) return
         for (rule in rules) {
             val match = rule.regex.find(line) ?: continue
             val op = rule.toOp(match)
@@ -391,6 +405,68 @@ object SubviewLogMonitor {
             
             if (op is Op.Add && op.name in POPUP_CLASSES) ensurePopupPoller(myGen)
         }
+    }
+
+    
+    private fun handleDocLassoLine(myGen: Int, line: String): Boolean {
+        if (!line.contains("Document")) return false
+        val reason = when {
+            line.contains("onChangeLassoState:") -> {
+                val state = Regex("""onChangeLassoState:\s*(\d+)""").find(line)?.groupValues?.get(1)?.toIntOrNull()
+                if (state == 2) "doc lasso state removed" else return true
+            }
+            line.contains("tag: appendTrail") -> "doc sticker appended as trail"
+            else -> return false
+        }
+        val currentListener = synchronized(lock) { if (isCurrent(myGen)) listener else null }
+        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "doc lasso released: $reason line=${line.trim().take(120)}")
+        currentListener?.onDocLassoReleased(reason, myGen)
+        return true
+    }
+
+    
+    
+    private val NOTE_DIALOG_PACKAGES = setOf(
+        "com.ratta.supernote.note",
+        "com.ratta.supernote.pluginhost",
+    )
+
+    
+    private val DIALOG_PID_REGEX = Regex("""DialogLib\(\s*(\d+)\)""")
+
+    
+    
+    private val dialogPackageCache = HashMap<Int, String?>()
+
+    
+    private fun packageOfPid(pid: Int): String? {
+        synchronized(dialogPackageCache) {
+            if (dialogPackageCache.containsKey(pid)) return dialogPackageCache[pid]
+        }
+        val pkg = try {
+            java.io.File("/proc/$pid/cmdline").readText()
+                .substringBefore('\u0000')
+                .substringBefore(':')
+                .trim()
+                .ifEmpty { null }
+        } catch (_: Exception) {
+            null
+        }
+        synchronized(dialogPackageCache) { dialogPackageCache[pid] = pkg }
+        return pkg
+    }
+
+    
+    private fun isForeignDialogLine(line: String): Boolean {
+        if (!line.contains("DialogLib")) return false
+        if (!line.contains("dialog show") && !line.contains("dialog dismiss")) return false
+        val pid = DIALOG_PID_REGEX.find(line)?.groupValues?.get(1)?.toIntOrNull() ?: return false
+        val pkg = packageOfPid(pid) ?: return false
+        val foreign = pkg !in NOTE_DIALOG_PACKAGES
+        if (foreign && BuildConfig.ENABLE_DEBUG) {
+            Log.i(TAG, "ignore foreign dialog pkg=$pkg pid=$pid line=${line.trim().take(120)}")
+        }
+        return foreign
     }
 
     private fun handleOwnedRotationDialogLine(myGen: Int, line: String): Boolean {
@@ -453,6 +529,7 @@ object SubviewLogMonitor {
                 Log.i(TAG, "host pen table rebuild signal=$rebuildSignal " +
                     "snapshotHeader=$hasSnapshotHeader line=$line")
             }
+            if (rebuildSignal == "doc-write-area") currentListener?.onDocWriteAreaRebuilt(myGen)
             if (!hasSnapshotHeader) {
                 pendingNativeAreaCount = -1
                 pendingNativeAreas.clear()

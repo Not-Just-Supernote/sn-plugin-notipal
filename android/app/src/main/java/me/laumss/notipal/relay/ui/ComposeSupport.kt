@@ -1,6 +1,7 @@
 package me.laumss.notipal.relay.ui
 
 import android.util.Log
+import android.graphics.Color as AndroidColor
 import android.view.View
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
@@ -98,6 +99,10 @@ private class DuScrollController(private val view: View) {
         try {
             if (value) View::class.java.getMethod("setEinkUpdateMode", Int::class.javaPrimitiveType).invoke(view, DU_MODE)
             else { View::class.java.getMethod("resetEinkUpdateMode").invoke(view); view.postInvalidateOnAnimation() }
+            
+            
+            
+            view.setBackgroundColor(if (value) AndroidColor.WHITE else AndroidColor.TRANSPARENT)
             enabled = value
         } catch (e: Exception) { Log.w("RelayDuScroll", "E-ink DU unavailable: ${e.message}") }
     }

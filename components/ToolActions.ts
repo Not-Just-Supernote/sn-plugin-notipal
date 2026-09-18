@@ -1,4 +1,4 @@
-import { PluginCommAPI, PluginFileAPI, PluginNoteAPI, PluginManager, NativeUIUtils, FileUtils } from 'sn-plugin-lib';
+import { PluginCommAPI, PluginFileAPI, PluginNoteAPI, PluginManager, NativeUIUtils, FileUtils, PointUtils } from 'sn-plugin-lib';
 import { NativeModules, EmitterSubscription, Dimensions } from 'react-native';
 import { loadClips, saveClips, loadSnapshots, saveSnapshots } from './ToolPresets';
 import { t } from './i18n';
@@ -193,9 +193,15 @@ async function _insertDocLinkDirect(docPath: string): Promise<void> {
       right: textLink.rect.right + pad,
       bottom: textLink.rect.bottom + pad,
     };
+    console.log('[ToolActions] lassoElements rect:', JSON.stringify(lassoRect),
+      'textLink.rect:', JSON.stringify(textLink.rect), 'pageW:', pageW, 'pageH:', pageH);
     const lr: any = await PluginCommAPI.lassoElements(lassoRect);
+    console.log('[ToolActions] lassoElements result:', JSON.stringify(lr));
     if (lr?.success && lr.result !== false) {
-      await (PluginCommAPI as any).setLassoBoxState?.(0);
+      const shown: any = await (PluginCommAPI as any).setLassoBoxState?.(0);
+      console.log('[ToolActions] setLassoBoxState(0) result:', JSON.stringify(shown));
+    } else {
+      console.warn('[ToolActions] lassoElements did not select: success=', lr?.success, 'result=', lr?.result);
     }
   } catch (e) {
     console.warn('[ToolActions] lassoElements after insertTextLink failed:', e);
@@ -223,13 +229,10 @@ export async function executeAction(action: string): Promise<string> {
   }
 
   if (action === TOOL_IDS.AI_RELAY) {
-    const { startAiReceiveMode, stopAiMode, isAiActive } = require('./BackgroundService');
-    if (isAiActive()) {
-      stopAiMode();
-      return 'AI receive: OFF';
-    }
+    
+    const { startAiReceiveMode } = require('./BackgroundService');
     await startAiReceiveMode();
-    return 'AI receive: ON';
+    return 'Opened AI bubble';
   }
 
   if (action === 'lasso_ai') {
@@ -238,6 +241,15 @@ export async function executeAction(action: string): Promise<string> {
   }
 
   if (action === TOOL_IDS.SMART_LASSO) {
+    
+    
+    if (isMosaicBoardVisible()) {
+      FloatingToolbarBridge.showSmartLassoCapture();
+      return 'Smart lasso capture opened';
+    }
+    if (!await ctx()) return 'Smart lasso: no current page';
+    
+    
     if (await hasLassoSelection()) {
       const { LassoExtractor } = require('./LassoExtractor');
       const { markLassoDataPrePopulated } = require('../App');
@@ -255,9 +267,6 @@ export async function executeAction(action: string): Promise<string> {
       FloatingToolbarBridge.showSendPanelFromBubble();
       return 'Send panel opened';
     }
-    
-    
-    
     FloatingToolbarBridge.showSmartLassoCapture();
     return 'Smart lasso capture opened';
   }
@@ -337,6 +346,11 @@ export async function executeAction(action: string): Promise<string> {
     if (_imageQueue.length > 0) {
       const imgPath = _imageQueue.shift()!;
       console.log('[QUEUE-DBG/TS] image queue pop:', imgPath, 'remaining:', _imageQueue.length);
+      
+      if (isMosaicBoardVisible()) {
+        const ok = await FloatingToolbarBridge.enqueueMosaicImage(imgPath, 'inkling-insert-image');
+        return ok ? 'Image queued to Mosaic' : 'Image queue to Mosaic failed';
+      }
       try {
 
         try { await (PluginCommAPI as any).setLassoBoxState?.(2); } catch (_) {}
@@ -353,7 +367,8 @@ export async function executeAction(action: string): Promise<string> {
     return 'Doc screenshot: delegated to native';
   }
 
-  if (!action.startsWith('clip_save_')) {
+  
+  if (!action.startsWith('clip_save_') && !isMosaicBoardVisible()) {
     if (!await ctx()) return 'No file context';
   }
 
@@ -375,6 +390,8 @@ export async function executeAction(action: string): Promise<string> {
     }
     if (action.startsWith('clip_save_clear_')) {
       const slot = action.charAt(action.length - 1);
+      
+      if (isMosaicBoardVisible()) return await mosaicClipSave(slot, { deleteAfter: true });
       const saved = await clipSave(slot);
       if (!saved.startsWith('Saved to clip')) return saved;
       const removed: any = await PluginCommAPI.deleteLassoElements();
@@ -383,6 +400,7 @@ export async function executeAction(action: string): Promise<string> {
     }
     if (action.startsWith('clip_save_')) {
       const slot = action.charAt(action.length - 1);
+      if (isMosaicBoardVisible()) return await mosaicClipSave(slot);
       return await clipSave(slot);
     }
     if (action.startsWith('clip_clear_')) {
@@ -649,10 +667,276 @@ async function mergeLayer(
   }
 }
 
+
+
+
+
+
+
+const MOSAIC_CLIP_DIR = '/sdcard/EXPORT/mosaic';
+const MOSAIC_LASSO_FILE = `${MOSAIC_CLIP_DIR}/clip_lasso.json`;
+const MOSAIC_PASTE_FILE = `${MOSAIC_CLIP_DIR}/paste_strokes.json`;
+
+const SIDE_MARGIN = 100;          
+const MOSAIC_PRESSURE = 1000;     
+const MOSAIC_THICK_FACTOR = 20;   
+const MOSAIC_THICK_MIN = 100;
+const MOSAIC_THICK_MAX = 900;
+
+function isMosaicBoardVisible(): boolean {
+  try { return (FloatingToolbar as any)?.isMosaicBoardVisible?.() === true; } catch { return false; }
+}
+
+
+
+function notifyStickerInserted(): void {
+  try { (FloatingToolbar as any)?.notifyStickerInserted?.(); } catch (_) {}
+}
+
+
+function mosaicPenToSdk(objType: number): number {
+  switch (objType) {
+    case 18: return 10; 
+    case 0:  return 1;  
+    case 14: return 15; 
+    case 15: return 15; 
+    case 17: return 11; 
+    default: return 1;
+  }
+}
+
+function sdkPenToMosaic(penType: number): number {
+  switch (penType) {
+    case 10: return 18;
+    case 1:  return 0;
+    case 6:  return 14;
+    case 14:
+    case 15: return 14; 
+    case 11: return 17;
+    default: return 0;
+  }
+}
+
+function mosaicPageSize(deviceType: number): { width: number; height: number } {
+  
+  return deviceType === 5 ? { width: 1920, height: 2560 } : { width: 1404, height: 1872 };
+}
+
+async function readMosaicStrokesFile(path: string): Promise<any[] | null> {
+  const RNFS = getRNFS();
+  if (!RNFS) return null;
+  try {
+    if (!(await RNFS.exists(path))) return null;
+    const json = JSON.parse(await RNFS.readFile(path, 'utf8'));
+    const strokes = Array.isArray(json?.strokes) ? json.strokes : null;
+    return strokes && strokes.length > 0 ? strokes : null;
+  } catch (e) {
+    console.warn('[MOSAIC-CLIP] read strokes failed', path, e);
+    return null;
+  }
+}
+
+
+async function writeMosaicSidecar(stickerPath: string, strokes: any[]): Promise<void> {
+  const RNFS = getRNFS();
+  if (!RNFS) return;
+  try {
+    await RNFS.writeFile(`${stickerPath}.mosaic.json`, JSON.stringify({ v: 1, strokes }), 'utf8');
+  } catch (e) {
+    console.warn('[MOSAIC-CLIP] write sidecar failed', e);
+  }
+}
+
+
+async function elementsToMosaicStrokes(
+  elements: any[], pageSize: { width: number; height: number },
+): Promise<any[]> {
+  const out: any[] = [];
+  for (const el of elements) {
+    const stroke = el?.stroke;
+    if (!stroke?.points) continue;
+    try {
+      const n = await stroke.points.size();
+      if (!n || n < 2) continue;
+      const emrPts: any[] = await stroke.points.getRange(0, n);
+      let prs: any[] = [];
+      try { prs = await stroke.pressures.getRange(0, n); } catch (_) {}
+      const pts: number[] = [];
+      for (let i = 0; i < emrPts.length; i++) {
+        const a = PointUtils.emrPoint2Android(emrPts[i], pageSize);
+        const pr = typeof prs[i] === 'number' ? Math.max(0, Math.min(1, prs[i] / MOSAIC_PRESSURE)) : 1;
+        pts.push(a.x, a.y, pr);
+      }
+      if (pts.length < 6) continue;
+      out.push({
+        penStyle: sdkPenToMosaic(stroke.penType ?? 1),
+        width: Math.max(1, Math.round((el.thickness ?? MOSAIC_PRESSURE) / MOSAIC_THICK_FACTOR)),
+        pts,
+      });
+    } catch (e) {
+      console.warn('[MOSAIC-CLIP] element read failed', e);
+    }
+  }
+  return out;
+}
+
+
+
+function requestMosaicClearSelection(deleteAfter: boolean): void {
+  try { (FloatingToolbar as any)?.requestMosaicClearSelection?.(deleteAfter); }
+  catch (e) { console.warn('[MOSAIC-CLIP] clear-selection broadcast failed', e); }
+}
+
+
+async function mosaicStrokesToElements(
+  strokes: any[], pageSize: { width: number; height: number },
+): Promise<any[] | null> {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const s of strokes) {
+    const p = s.pts ?? [];
+    for (let i = 0; i + 1 < p.length; i += 3) {
+      if (p[i] < minX) minX = p[i]; if (p[i] > maxX) maxX = p[i];
+      if (p[i + 1] < minY) minY = p[i + 1]; if (p[i + 1] > maxY) maxY = p[i + 1];
+    }
+  }
+  if (!(maxX >= minX)) return [];
+  const bw = Math.max(1, maxX - minX), bh = Math.max(1, maxY - minY);
+  const fit = Math.min(1, (pageSize.width - 2 * SIDE_MARGIN) / bw, (pageSize.height - 2 * SIDE_MARGIN) / bh);
+
+  const elements: any[] = [];
+  for (const s of strokes) {
+    const createRes: any = await (PluginCommAPI as any).createElement(0);
+    if (!createRes?.success || !createRes.result) { console.warn('[MOSAIC-CLIP] createElement failed'); return null; }
+    const el: any = createRes.result;
+    const emrPoints: any[] = []; const pressures: number[] = [];
+    const p = s.pts ?? [];
+    for (let i = 0; i + 2 < p.length; i += 3) {
+      const pageX = SIDE_MARGIN + (p[i] - minX) * fit;
+      const pageY = SIDE_MARGIN + (p[i + 1] - minY) * fit;
+      emrPoints.push(PointUtils.androidPoint2Emr({ x: Math.round(pageX), y: Math.round(pageY) }, pageSize));
+      pressures.push(Math.max(1, Math.round((p[i + 2] ?? 1) * MOSAIC_PRESSURE)));
+    }
+    if (emrPoints.length < 2 || !el.stroke) continue;
+    el.thickness = Math.max(MOSAIC_THICK_MIN, Math.min(MOSAIC_THICK_MAX, Math.round((s.width ?? 2) * fit * MOSAIC_THICK_FACTOR)));
+    el.stroke.penColor = 0;
+    el.stroke.penType = mosaicPenToSdk(s.penStyle ?? 0);
+    const okPts = await el.stroke.points.setRange(0, emrPoints.length - 1, emrPoints);
+    const okPrs = await el.stroke.pressures.setRange(0, pressures.length - 1, pressures);
+    if (!okPts || !okPrs) { console.warn('[MOSAIC-CLIP] setRange failed'); return null; }
+    elements.push(el);
+  }
+  return elements;
+}
+
+
+export async function extractMosaicLassoText(
+  onProgress?: (stage: 'recognizing' | 'done') => void,
+): Promise<string | null> {
+  const strokes = await readMosaicStrokesFile(MOSAIC_LASSO_FILE);
+  if (!strokes) return null;
+  const canWrite = await FloatingToolbarBridge.requestFileWritePermission();
+  if (!canWrite) {
+    try { NativeUIUtils.showErrorTipDialog(t('perm_required')); } catch (_) {}
+    return null;
+  }
+  const deviceType = await PluginManager.getDeviceType();
+  const pageSize = mosaicPageSize(deviceType);
+  const elements = await mosaicStrokesToElements(strokes, pageSize);
+  if (!elements || elements.length === 0) return null;
+  try { onProgress?.('recognizing'); } catch (_) {}
+  try {
+    const res: any = await PluginCommAPI.recognizeElements(elements, pageSize);
+    if (res?.success && typeof res.result === 'string' && res.result.trim()) return res.result.trim();
+    console.warn('[MOSAIC-OCR] recognizeElements empty/failed:', res?.error?.message);
+    return null;
+  } catch (e) {
+    console.warn('[MOSAIC-OCR] recognizeElements threw:', e);
+    return null;
+  } finally {
+    try { onProgress?.('done'); } catch (_) {}
+  }
+}
+
+
+async function mosaicClipSave(slot: string, opts: { deleteAfter?: boolean } = {}): Promise<string> {
+  const strokes = await readMosaicStrokesFile(MOSAIC_LASSO_FILE);
+  if (!strokes) { NativeUIUtils.showErrorTipDialog(t('clip_err_read_failed')); return 'Mosaic clip empty'; }
+  await ensureStickerDir();
+
+  const existingClips = await loadClips();
+  const oldPath = existingClips[slot];
+  const path = `${STICKER_DIR}/quickbar_clip_${slot}_${Date.now()}.sticker`;
+
+  if (oldPath && await getRNFS()?.exists(oldPath).catch(() => false)) {
+    const confirmed = await NativeUIUtils.showRattaDialog(
+      t('clip_overwrite'), t('btn_cancel'), t('btn_confirm'), false,
+    ).catch(() => true);
+    if (!confirmed) return `Clip ${slot} overwrite cancelled`;
+  }
+
+  const deviceType = await PluginManager.getDeviceType();
+  const pageSize = mosaicPageSize(deviceType);
+
+  const elements = await mosaicStrokesToElements(strokes, pageSize);
+  if (elements === null) return `Save clip ${slot} failed`;
+  if (elements.length === 0) return `Save clip ${slot} failed (no strokes)`;
+
+  const convertRes: any = await NativeModules.NativePluginAPI.convertElement2Sticker({
+    machineType: deviceType, elements, stickerPath: path,
+  });
+  if (!convertRes?.success || convertRes.result === false) {
+    NativeUIUtils.showErrorTipDialog(t('clip_save_failed'));
+    return `Save clip ${slot} failed`;
+  }
+
+  
+  
+  await writeMosaicSidecar(path, strokes);
+  if (oldPath) {
+    try { await FileUtils.deleteFile(oldPath); } catch (_) {}
+    try { await FileUtils.deleteFile(oldPath + '.mosaic.json'); } catch (_) {}
+    try { await FileUtils.deleteFile(oldPath + '.meta.json'); } catch (_) {}
+  }
+  const clips = await loadClips(); clips[slot] = path; await saveClips(clips);
+  requestMosaicClearSelection(opts.deleteAfter === true);
+  return `Saved to clip ${slot}`;
+}
+
+
+async function mosaicClipPaste(slot: string): Promise<string> {
+  const clips = await loadClips();
+  const stored = clips[slot];
+  if (!stored) { NativeUIUtils.showErrorTipDialog(t('clip_empty_hint')); return 'Clip empty'; }
+  const stickerPath = stored.startsWith('/') ? stored : `${STICKER_DIR}/${stored}`;
+  const RNFS = getRNFS();
+  if (!RNFS) return `Paste clip ${slot} failed (no fs)`;
+
+  const strokes = await readMosaicStrokesFile(`${stickerPath}.mosaic.json`);
+  if (!strokes) {
+    NativeUIUtils.showErrorTipDialog(t('clip_err_read_failed'));
+    return `Paste clip ${slot} failed (no mosaic sidecar)`;
+  }
+  try {
+    await RNFS.mkdir(MOSAIC_CLIP_DIR).catch(() => {});
+    await RNFS.writeFile(MOSAIC_PASTE_FILE, JSON.stringify({ v: 1, strokes }), 'utf8');
+  } catch (e) {
+    console.warn('[MOSAIC-CLIP] write paste file failed', e);
+    return `Paste clip ${slot} failed`;
+  }
+  try { (FloatingToolbar as any)?.requestMosaicPasteStrokes?.(); } catch (e) { console.warn('[MOSAIC-CLIP] broadcast failed', e); }
+  return `Pasted clip ${slot} to Mosaic`;
+}
+
 async function clipSmartAction(slot: string): Promise<string> {
   if (_clipBusy) return 'Clip busy';
   _clipBusy = true;
   try {
+    
+    if (isMosaicBoardVisible()) {
+      const hasSel = (await readMosaicStrokesFile(MOSAIC_LASSO_FILE)) != null;
+      return hasSel ? await mosaicClipSave(slot) : await mosaicClipPaste(slot);
+    }
+
     let hasLasso = false;
     try {
       const lassoRes = await PluginCommAPI.getLassoRect();
@@ -705,6 +989,7 @@ async function clipSave(slot: string): Promise<string> {
     if (oldPath) {
       try { await FileUtils.deleteFile(oldPath); } catch (_) {}
       try { await FileUtils.deleteFile(oldPath + '.meta.json'); } catch (_) {}
+      try { await FileUtils.deleteFile(oldPath + '.mosaic.json'); } catch (_) {}
     }
     await PluginCommAPI.setLassoBoxState(2);
     const clips = await loadClips();
@@ -777,6 +1062,20 @@ async function clipSave(slot: string): Promise<string> {
     NativeUIUtils.showErrorTipDialog(t('clip_save_failed'));
     return `Save clip ${slot} failed`;
   }
+
+  
+  try {
+    const fpRes: any = await PluginCommAPI.getCurrentFilePath();
+    const pgRes: any = await PluginCommAPI.getCurrentPageNum();
+    if (fpRes?.success && fpRes.result && pgRes?.success && pgRes.result != null) {
+      const psRes: any = await PluginFileAPI.getPageSize(fpRes.result, pgRes.result);
+      const pageSize = psRes?.result;
+      if (pageSize?.width && pageSize?.height) {
+        const mstrokes = await elementsToMosaicStrokes(elemRes.result, pageSize);
+        if (mstrokes.length > 0) await writeMosaicSidecar(path, mstrokes);
+      }
+    }
+  } catch (e) { console.warn('[MOSAIC-CLIP] note-origin sidecar failed', e); }
 
   return await commitSave();
 }
@@ -931,6 +1230,7 @@ async function clipPasteSticker(slot: string): Promise<string> {
       const r = await PluginCommAPI.insertSticker(path);
       console.log('[CLIP-DBG] insertSticker result:', JSON.stringify(r));
       if (r.success) {
+        notifyStickerInserted();
         return `Pasted clip ${slot}`;
       }
     } catch (e) { console.warn('[CLIP-DBG] insertSticker error:', e); }
@@ -939,6 +1239,7 @@ async function clipPasteSticker(slot: string): Promise<string> {
       const r2 = await PluginCommAPI.insertSticker(path + '.sticker');
       console.log('[CLIP-DBG] insertSticker(.sticker) result:', JSON.stringify(r2));
       if (r2.success) {
+        notifyStickerInserted();
         return `Pasted clip ${slot}`;
       }
     } catch (e) { console.warn('[CLIP-DBG] insertSticker(.sticker) error:', e); }
@@ -1144,7 +1445,7 @@ export async function snapshotRestore(stickerPath: string): Promise<string> {
   try {
     const r: any = await PluginCommAPI.insertSticker(stickerPath);
     console.log('[SNAP] insertSticker result:', JSON.stringify(r));
-    if (r?.success) return 'Snapshot restored';
+    if (r?.success) { notifyStickerInserted(); return 'Snapshot restored'; }
   } catch (e) { console.warn('[SNAP] insertSticker error:', e); }
   NativeUIUtils.showErrorTipDialog(t('snapshot_restore_failed'));
   return 'Snapshot restore failed';
@@ -1166,6 +1467,7 @@ async function clipClear(slot: string): Promise<string> {
   if (oldPath) {
     try { await FileUtils.deleteFile(oldPath); } catch (_) {}
     try { await FileUtils.deleteFile(oldPath + '.meta.json'); } catch (_) {}
+    try { await FileUtils.deleteFile(oldPath + '.mosaic.json'); } catch (_) {}
   }
   clips[slot] = null;
   await saveClips(clips);

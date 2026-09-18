@@ -29,6 +29,9 @@ internal object FloatingPenGuard {
     private val worker = Executors.newSingleThreadExecutor()
     private val pendingAppClears = java.util.concurrent.ConcurrentLinkedQueue<String>()
     private val rects = linkedMapOf<String, Rect>()
+    
+    
+    private val logicalRects = linkedMapOf<String, Rect>()
     private val views = linkedMapOf<String, WeakReference<View>>()
     private val viewRotationEpochs = linkedMapOf<String, Long>()
     private val generation = AtomicLong()
@@ -206,7 +209,7 @@ internal object FloatingPenGuard {
             
             if (parkedKeys.isNotEmpty()) {
                 if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "display change: drop parked=$parkedKeys")
-                synchronized(rects) { parkedKeys.forEach(rects::remove) }
+                synchronized(rects) { parkedKeys.forEach { rects.remove(it); logicalRects.remove(it) } }
                 parkedKeys.clear()
             }
             parkActive = false
@@ -609,6 +612,7 @@ internal object FloatingPenGuard {
         if (drawPathRect.isEmpty) return
         if (views[key]?.get() !== view) return
         val changed = synchronized(rects) {
+            logicalRects[key] = Rect(logicalRect)
             if (rects[key] == drawPathRect) false else {
                 rects[key] = Rect(drawPathRect)
                 true
@@ -618,6 +622,7 @@ internal object FloatingPenGuard {
             viewRotationEpochs[key] = rotationEpoch
         }
         if (!changed) return
+        if (key == "toolbar") MosaicLink.publishToolbarRect(view.context, logicalRect)
         Log.i(TAG, "refresh key=$key screen=${screen[0]},${screen[1]} " +
             "window=${window[0]},${window[1]} size=${view.width}x${view.height} " +
             "logicalDisplay=${effectiveLogicalWidth}x${effectiveLogicalHeight} " +
@@ -679,6 +684,7 @@ internal object FloatingPenGuard {
 
     
     private fun releaseRect(key: String) {
+        if (key == "toolbar") MosaicLink.publishToolbarRect(null, null)
         if (!synchronized(rects) { rects.containsKey(key) }) return
         if (parkActive) {
             
@@ -690,7 +696,10 @@ internal object FloatingPenGuard {
         if (pendingRemovals.containsKey(key)) return
         val r = Runnable {
             pendingRemovals.remove(key)
-            val changed = synchronized(rects) { rects.remove(key) != null }
+            val changed = synchronized(rects) {
+                logicalRects.remove(key)
+                rects.remove(key) != null
+            }
             if (!changed) return@Runnable
             Log.i(TAG, "remove key=$key")
             submitSnapshot()
@@ -724,7 +733,9 @@ internal object FloatingPenGuard {
         val released = parkedKeys.filter { flush || views[it]?.get() == null }
         parkedKeys.clear()
         if (released.isEmpty()) return
-        val changed = synchronized(rects) { released.count { rects.remove(it) != null } } > 0
+        val changed = synchronized(rects) {
+            released.count { rects.remove(it).also { _ -> logicalRects.remove(it) } != null }
+        } > 0
         Log.i(TAG, "park end reason=$reason flush=$flush released=$released")
         if (changed) submitSnapshot()
     }
@@ -775,6 +786,22 @@ internal object FloatingPenGuard {
         }
     }
 
+    
+    private fun publishOverlayRectsToMosaic() {
+        val out = synchronized(rects) {
+            val hasFullScreen = fullScreenOwners.any { it != ROTATION_SYNC_OWNER }
+            if (hasFullScreen) {
+                listOf(Rect(0, 0, logicalScreenWidth, logicalScreenHeight))
+            } else {
+                logicalRects.entries
+                    .filter { it.key != "toolbar" }
+                    .map { Rect(it.value) }
+                    .distinctBy { listOf(it.left, it.top, it.right, it.bottom) }
+            }
+        }
+        MosaicLink.publishOverlayRects(null, out)
+    }
+
     private fun submitSnapshot() {
         val state = synchronized(rects) {
             val inkling = if (fullScreenOwners.isNotEmpty()) {
@@ -789,6 +816,11 @@ internal object FloatingPenGuard {
                 lastSentSnapshot.any(::isScreenCovering)
             )
         }
+        
+        
+        
+        if (MosaicLink.isBoardVisible()) publishOverlayRectsToMosaic()
+
         val inklingSnapshot = state.first.first
         val outgoing = state.first.second
         val baselineReady = state.first.third

@@ -451,16 +451,24 @@ class ImagePanel(
                 if (BuildConfig.ENABLE_DEBUG) Log.i(tag, "[QUEUE-DBG] doInsertOriginal: selected=${paths.size} queued=${imageQueue.size} queue=${imageQueue.toList()}")
             }
             
-            FloatingToolbarModule.beginInsertImageGuard()
             hide()
+            if (MosaicLink.isBoardVisible()) {
+                toolbar.enqueueImageToMosaic(paths.first(), "inkling-insert-image")
+                return
+            }
+            FloatingToolbarModule.beginInsertImageGuard()
             handler.postDelayed({ toolbar.requestInsertImage(paths.first()) }, 300)
         } else {
             val path = selectedImagePath ?: return
             if (fromReceived) {
                 synchronized(ImagePanel::class.java) { pendingReceivedDeletes.add(path) }
             }
-            FloatingToolbarModule.beginInsertImageGuard()
             hide()
+            if (MosaicLink.isBoardVisible()) {
+                toolbar.enqueueImageToMosaic(path, "inkling-insert-image")
+                return
+            }
+            FloatingToolbarModule.beginInsertImageGuard()
             handler.postDelayed({ toolbar.requestInsertImage(path) }, 300)
         }
     }
@@ -473,9 +481,7 @@ class ImagePanel(
         handler.postDelayed({
             if (BuildConfig.ENABLE_DEBUG) Log.i("ImagePanel", "[CROP] opening CropPanel")
             CropPanel.getInstance(reactContext, toolbar).show(path) { crop ->
-            
-            
-            FloatingToolbarModule.beginInsertImageGuard()
+            if (!MosaicLink.isBoardVisible()) FloatingToolbarModule.beginInsertImageGuard()
             kotlin.concurrent.thread(isDaemon = true) {
                 try {
                     val src = BitmapFactory.decodeFile(path) ?: return@thread
@@ -497,7 +503,10 @@ class ImagePanel(
                     if (fromReceived) {
                         synchronized(ImagePanel::class.java) { pendingReceivedDeletes.add(path) }
                     }
-                    handler.post { toolbar.requestInsertImage(outPath) }
+                    handler.post {
+                        if (MosaicLink.isBoardVisible()) toolbar.enqueueImageToMosaic(outPath, "inkling-insert-image")
+                        else toolbar.requestInsertImage(outPath)
+                    }
                 } catch (e: Exception) {
                     if (BuildConfig.ENABLE_DEBUG) Log.e("ImagePanel", "crop failed: ${e.message}", e)
                     handler.post { toolbarModule.restoreToolbar() }

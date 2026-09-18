@@ -5,6 +5,10 @@ param(
 
 if ($args -contains '--with-logs') { $WithLogs = $true }
 
+function Test-WithLogsEnabled {
+    return [bool]$script:WithLogs -or $env:WITH_LOGS -eq '1'
+}
+
 function Write-ColorOutput {
     param(
         [string]$Message,
@@ -767,7 +771,7 @@ function Build-AndroidApk {
         Set-Location $androidDir
 
         $apkTask = 'buildCustomApkDebug'
-        $debugProp = if ($script:WithLogs) { '-PinklingEnableDebug=true' } else { '-PinklingEnableDebug=false' }
+        $debugProp = if (Test-WithLogsEnabled) { '-PinklingEnableDebug=true' } else { '-PinklingEnableDebug=false' }
 
         $gradlewPath = Join-Path $androidDir 'gradlew.bat'
         if (Test-Path $gradlewPath) {
@@ -889,7 +893,7 @@ function Build-ReactNativeBundle {
 
     Write-ColorOutput 'Starting React Native bundling...' 'Blue'
 
-    if ($script:WithLogs) {
+    if (Test-WithLogsEnabled) {
         $env:WITH_LOGS = '1'
         Write-ColorOutput 'Log mode: INCLUDED (WITH_LOGS=1, debug build)' 'Yellow'
     } elseif ($env:WITH_LOGS -eq '1') {
@@ -900,6 +904,21 @@ function Build-ReactNativeBundle {
 
     Write-ColorOutput 'Copying mathjax from node_modules...' 'Blue'
     & npm run copy-mathjax --prefix $ProjectRoot
+    if ($LASTEXITCODE -ne 0) {
+        Write-ColorOutput 'MathJax asset preparation failed; cannot continue bundling' 'Red'
+        return $false
+    }
+
+    $debugKeystore = Join-Path $androidDir 'app\debug.keystore'
+    if (-not (Test-Path $debugKeystore)) {
+        $keytool = if ($env:JAVA_HOME) { Join-Path $env:JAVA_HOME 'bin\keytool.exe' } else { 'keytool.exe' }
+        Write-ColorOutput 'debug.keystore missing; generating standard debug keystore...' 'Yellow'
+        & $keytool -genkeypair -v -keystore $debugKeystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 36500 -dname 'CN=Android Debug,O=Android,C=US' | Out-Null
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path $debugKeystore)) {
+            Write-ColorOutput 'Unable to generate android/app/debug.keystore' 'Red'
+            return $false
+        }
+    }
 
     $bundleOutput = Join-Path $OutputDir "$ProjectName.bundle"
     $assetsDir = $OutputDir
@@ -1198,7 +1217,7 @@ function Main {
     Copy-Item $rootConfigFile $buildGeneratedConfigFile -Force
     Write-ColorOutput 'Copied root directory PluginConfig.json to build/generated folder' 'Green'
 
-    if ($script:WithLogs) {
+    if (Test-WithLogsEnabled) {
         $cfg = Get-Content $buildGeneratedConfigFile -Raw -Encoding UTF8 | ConvertFrom-Json
         $cfgHash = @{}
         $cfg.PSObject.Properties | ForEach-Object { $cfgHash[$_.Name] = $_.Value }
@@ -1300,7 +1319,7 @@ function Main {
         return
     }
 
-    $devSuffix = if ($script:WithLogs) { '-dev' } else { '' }
+    $devSuffix = if (Test-WithLogsEnabled) { '-dev' } else { '' }
     $snplgFileName = "$($packageInfo.Name)$devSuffix.snplg"
     $finalSnplgPath = Join-Path $buildOutputsDir $snplgFileName
     $outputName = "$($packageInfo.Name)$devSuffix"

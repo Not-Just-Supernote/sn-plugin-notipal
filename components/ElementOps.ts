@@ -1,4 +1,4 @@
-import { PluginCommAPI, PluginNoteAPI } from 'sn-plugin-lib';
+import { PluginCommAPI, PluginNoteAPI, PluginFileAPI } from 'sn-plugin-lib';
 
 const TAG = '[ElementOps]';
 const MARKER_PT = 11;
@@ -60,6 +60,24 @@ export async function modifyLiveElements(elements: any[], page: number): Promise
     if (Array.isArray(res.result)) modified.push(...res.result);
   }
   return { success: true, result: modified };
+}
+
+
+
+
+
+
+
+export async function modifyFileElements(
+  filePath: string,
+  page: number,
+  elements: any[],
+): Promise<any> {
+  if (!elements.length) return { success: true, result: [] };
+  console.log(TAG, `modifyElements(file) n=${elements.length} page=${page}`);
+  const res: any = await (PluginFileAPI as any).modifyElements(filePath, page, elements);
+  console.log(TAG, `modifyElements(file) ok=${res?.success} err=${res?.error?.message ?? ''} result=${JSON.stringify(res?.result)}`);
+  return res;
 }
 
 

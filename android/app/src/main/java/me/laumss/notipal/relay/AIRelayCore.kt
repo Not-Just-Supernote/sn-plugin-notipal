@@ -291,15 +291,17 @@ class AIRelayCore private constructor(context: Context) {
                     )
                 }
             }
-            pairedFp.isNotEmpty() && llmBridge?.isConnected == true -> {
+            pairedFp.isNotEmpty() && pairingInFlight == null -> {
+                
                 
                 if (endpointChanged) {
                     Log.i(
                         TAG,
-                        "pairing decision: ignored different server while paired endpoint is connected " +
+                        "pairing decision: requesting replacement confirmation " +
                             "discovered=${peer.fingerprint} paired=$pairedFp " +
                             "endpoint=${peer.ip}:${peer.llmPort}"
                     )
+                    requestPairing(peer)
                 }
             }
             peer.fingerprint in declinedFingerprints -> {
@@ -353,14 +355,19 @@ class AIRelayCore private constructor(context: Context) {
         me.laumss.notipal.ui_common.Dialog.confirmResult(ctx, message) { accepted ->
             pairingInFlight = null
             if (!enabled || !started) return@confirmResult
-            if (accepted) {
-                Log.i(
-                    TAG,
+                if (accepted) {
+                    Log.i(
+                        TAG,
                     "pairing accepted: fingerprint=${peer.fingerprint} " +
                         "endpoint=${peer.ip}:${peer.llmPort}"
-                )
-                AppPrefs.setPhoneFingerprint(appContext, peer.fingerprint)
-                connectTo(PhoneEndpoint(peer.fingerprint, peer.ip, peer.llmPort))
+                    )
+                    
+                    
+                    if (AppPrefs.phoneFingerprint(appContext) != peer.fingerprint) {
+                        unpairPhone()
+                    }
+                    AppPrefs.setPhoneFingerprint(appContext, peer.fingerprint)
+                    connectTo(PhoneEndpoint(peer.fingerprint, peer.ip, peer.llmPort))
             } else {
                 Log.i(
                     TAG,

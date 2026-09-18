@@ -18,6 +18,7 @@ import me.laumss.notipal.panels.SendPanel
 import me.laumss.notipal.panels.StickyNotes
 import me.laumss.notipal.ui_common.Dialog
 import me.laumss.notipal.relay.AIRelayCore
+import me.laumss.notipal.render.PageImageSource
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -30,9 +31,9 @@ object RegionCaptureFlow {
     
     private const val TAG = "RegionCaptureFlow"
     private const val STAGE_DIR = "/sdcard/EXPORT/lasso_ai"
-    
-    private const val MOSAIC_INBOX_DIR = "/sdcard/EXPORT/mosaic/inbox"
     private const val REFRESH_WAIT_MS = 500L
+    
+    private const val RENDER_TIMEOUT_MS = 15_000L
 
     private val handler = Handler(Looper.getMainLooper())
 
@@ -44,10 +45,22 @@ object RegionCaptureFlow {
         left: Int, top: Int, right: Int, bottom: Int,
     ) {
         thread(isDaemon = false) {
+            val mosaicVisible = me.laumss.notipal.MosaicLink.isBoardVisible()
             
-            try { Thread.sleep(REFRESH_WAIT_MS) } catch (_: InterruptedException) {}
-            val srcPath = runScreencap(ctx) ?: run {
-                if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "screencap failed")
+            
+            
+            val srcPath = if (mosaicVisible) {
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "Mosaic visible: screenshot instead of page render")
+                try { Thread.sleep(REFRESH_WAIT_MS) } catch (_: InterruptedException) {}
+                runScreencap(ctx)
+            } else {
+                renderPage(ctx) ?: run {
+                    if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "page render unavailable, falling back to screencap")
+                    try { Thread.sleep(REFRESH_WAIT_MS) } catch (_: InterruptedException) {}
+                    runScreencap(ctx)
+                }
+            } ?: run {
+                if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "page render and screencap both failed")
                 emitCloseAndRestore(toolbar, ctx, fromBubble, null)
                 return@thread
             }
@@ -109,11 +122,14 @@ object RegionCaptureFlow {
                             emitCloseAndRestore(toolbar, ctx, fromBubble, null)
                             return@post
                         }
-                        
-                        
-                        emitCloseAndRestore(
-                            toolbar, ctx, fromBubble, null, restoreUi = false)
-                        toolbar.openMosaicPluginForPending()
+                        if (mosaicVisible) {
+                            
+                            emitCloseAndRestore(toolbar, ctx, fromBubble, null)
+                        } else {
+                            emitCloseAndRestore(
+                                toolbar, ctx, fromBubble, null, restoreUi = false)
+                            toolbar.openMosaicPluginForPending()
+                        }
                     }
                 }
                 else -> { 
@@ -122,6 +138,28 @@ object RegionCaptureFlow {
                 }
             }
         }
+    }
+
+    
+    private fun renderPage(ctx: ReactApplicationContext): String? {
+        val outPath = "${ctx.cacheDir.absolutePath}/region_page_${System.currentTimeMillis()}.png"
+        val latch = java.util.concurrent.CountDownLatch(1)
+        var result: String? = null
+        try {
+            PageImageSource.renderCurrentPage(ctx, outPath) { path, error ->
+                if (path != null) result = path
+                else if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "renderCurrentPage: $error")
+                latch.countDown()
+            }
+            if (!latch.await(RENDER_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "renderCurrentPage timed out after ${RENDER_TIMEOUT_MS}ms")
+                return null
+            }
+        } catch (e: Exception) {
+            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "renderPage EX: ${e.message}", e)
+            return null
+        }
+        return result?.takeIf { File(it).length() > 500 }
     }
 
     private fun runScreencap(ctx: ReactApplicationContext): String? {
@@ -139,42 +177,9 @@ object RegionCaptureFlow {
     }
 
     
-    private fun enqueueMosaicCard(croppedPath: String): Boolean {
-        return try {
-            val dir = File(MOSAIC_INBOX_DIR)
-            if (!dir.exists() && !dir.mkdirs()) {
-                if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "Mosaic inbox mkdir failed: $MOSAIC_INBOX_DIR")
-                return false
-            }
-            val id = "inkling-${System.currentTimeMillis()}-${(0..9999).random()}"
-            val imagePath = File(dir, "$id.png")
-            val requestPath = File(dir, "$id.json")
-            val tempRequestPath = File(dir, "$id.json.tmp")
-            File(croppedPath).copyTo(imagePath, overwrite = true)
-            val request = JSONObject().apply {
-                put("version", 1)
-                put("id", id)
-                put("imagePath", imagePath.absolutePath)
-                put("createdAt", System.currentTimeMillis())
-                put("source", "inkling-smart-lasso")
-            }
-            FileOutputStream(tempRequestPath).use {
-                it.write(request.toString().toByteArray(Charsets.UTF_8))
-            }
-            if (!tempRequestPath.renameTo(requestPath)) {
-                tempRequestPath.delete()
-                imagePath.delete()
-                return false
-            }
-            if (BuildConfig.ENABLE_DEBUG) {
-                Log.i(TAG, "Mosaic card queued id=$id path=${imagePath.absolutePath}")
-            }
-            true
-        } catch (e: Exception) {
-            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "enqueueMosaicCard failed: ${e.message}", e)
-            false
-        }
-    }
+    
+    private fun enqueueMosaicCard(croppedPath: String): Boolean =
+        me.laumss.notipal.MosaicLink.enqueueImage(croppedPath, "inkling-smart-lasso")
 
     private fun decodeDims(path: String): Pair<Int, Int>? {
         return try {

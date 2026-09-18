@@ -36,6 +36,8 @@ object NativeLocale {
                                   to "Notipal needs file write permission. Allow it in the dialog, then retry."),
         "mosaic_permission_needed" to ("Mosaic 需要文件读写权限才能接收截图，请在设置中允许后重试"
                                    to "Mosaic needs file read/write permission to receive captures. Allow it in Settings, then retry."),
+        "mosaic_plugin_needed" to ("请先安装 Mosaic 插件，再使用此功能"
+                                   to "Install the Mosaic plugin before using this feature."),
         "mosaic_permission_request" to ("Mosaic 需要访问共享截图目录，请允许文件读写权限"
                                    to "Mosaic needs access to the shared capture folder. Allow file read/write permission."),
         "open_settings" to ("打开设置" to "Open Settings"),

@@ -233,6 +233,11 @@ class RelayInboxPanel private constructor(
                             val id = requestedDetailId ?: return@MessageDetailContent
                             if (payload.hasMath) core.insertBlocks(id, payload.plainText, payload.blocksJson, replace = false)
                             else core.insertSelection(id, payload.plainText)
+                            
+                            
+                            
+                            
+                            backFromDetail()
                         },
                         onReplaceHandwriting = { payload ->
                             val id = requestedDetailId ?: return@MessageDetailContent

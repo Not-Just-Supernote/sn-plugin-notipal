@@ -170,6 +170,22 @@ const FloatingToolbarBridge = {
   },
 
   
+  paletteApplyFinished(): void {
+    try {
+      getFT()?.paletteApplyFinished();
+    } catch (e) {
+      console.warn('[FloatingToolbarBridge]: paletteApplyFinished failed:', e);
+    }
+  },
+
+  parkToolbarForLasso(holdForSelection: boolean): void {
+    try {
+      getFT()?.parkToolbarForLasso(holdForSelection);
+    } catch (e) {
+      console.warn('[FloatingToolbarBridge]: parkToolbarForLasso failed:', e);
+    }
+  },
+
   paletteSnapshotsChanged(): void {
     try {
       getFT()?.paletteSnapshotsChanged();
@@ -325,6 +341,23 @@ const FloatingToolbarBridge = {
     }
   },
 
+  
+  isMosaicBoardVisible(): boolean {
+    try { return getFT()?.isMosaicBoardVisible?.() === true; } catch { return false; }
+  },
+
+  
+  async enqueueMosaicImage(path: string, source: string): Promise<boolean> {
+    try { return (await getFT()?.enqueueMosaicImage?.(path, source)) === true; }
+    catch (e) { console.warn('[FloatingToolbarBridge]: enqueueMosaicImage failed:', e); return false; }
+  },
+
+  
+  requestMosaicTextCard(text: string, anchorScreenX: number, anchorScreenY: number): void {
+    try { getFT()?.requestMosaicTextCard?.(text, Math.round(anchorScreenX), Math.round(anchorScreenY)); }
+    catch (e) { console.warn('[FloatingToolbarBridge]: requestMosaicTextCard failed:', e); }
+  },
+
   toggleScreenshotBubble(mode?: 'note_notipal' | 'doc_notipal'): void {
     try {
       getFT()?.toggleScreenshotBubble?.(mode ?? null);
@@ -372,7 +405,6 @@ const FloatingToolbarBridge = {
       console.warn('[FloatingToolbarBridge]: showSmartLassoCapture failed:', e);
     }
   },
-
   onToolModeExit(
     cb: (e: { toolId: string; toolAction: string }) => void
   ): { remove(): void } {

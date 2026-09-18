@@ -398,7 +398,10 @@ build_react_native_bundle() {
     local bundle_output="$output_dir/${PKG_NAME}.bundle"
 
     print_color "Copying mathjax from node_modules..." Blue
-    (cd "$PROJECT_ROOT" && npm run copy-mathjax)
+    if ! (cd "$PROJECT_ROOT" && npm run copy-mathjax); then
+        print_color "MathJax asset preparation failed; cannot continue bundling" Red
+        return 1
+    fi
 
     print_color "Starting React Native bundling..." Blue
     print_color "Executing: npx react-native bundle ..." Yellow

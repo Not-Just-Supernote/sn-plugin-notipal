@@ -50,7 +50,9 @@ class PenLassoOverlay(private val context: ReactApplicationContext) {
         private const val ACTION_BAR_TOP_OFFSET_DP = 8
         private const val ACTION_BAR_SCREEN_MARGIN_DP = 12
         private const val ACTION_ICON_STROKE_DP = 2f
-        private const val HINT_BAR_HEIGHT_DP = 56
+    
+    
+    private const val HINT_BAR_HEIGHT_PX = 135f
 
         
         private val REARM_DELAYS_MS = longArrayOf(400L, 900L, 1700L)
@@ -191,6 +193,12 @@ class PenLassoOverlay(private val context: ReactApplicationContext) {
         if (BuildConfig.ENABLE_DEBUG) android.util.Log.i(TAG, "overlay shown, waiting for pen stroke...")
 
         armDrawPath("show-initial")
+        
+        
+        
+        handler.postDelayed({
+            if (rootView != null && stage == Stage.DRAW) armDrawPath("show-post-attach")
+        }, 80L)
         scheduleRearm(Stage.DRAW)
     }
 
@@ -744,10 +752,10 @@ class PenLassoOverlay(private val context: ReactApplicationContext) {
         }
         val text = TextView(context).apply {
             setTextColor(Color.WHITE)
-            textSize = 20f
-            gravity = Gravity.CENTER_VERTICAL or Gravity.START
+            textSize = 30f
+            gravity = Gravity.CENTER
             text = NativeLocale.t("smart_lasso_hint")
-            setPadding(dp(72), 0, dp(16), 0)
+            setPadding(ScreenScale.px(context, 51.5), 0, ScreenScale.px(context, 51.5), 0)
         }
         bar.addView(text, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT,
@@ -755,8 +763,8 @@ class PenLassoOverlay(private val context: ReactApplicationContext) {
         ))
         root.addView(bar, FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT,
-            dp(HINT_BAR_HEIGHT_DP)
-        ).apply { gravity = Gravity.BOTTOM or Gravity.START })
+            ScreenScale.px(context, HINT_BAR_HEIGHT_PX)
+        ).apply { gravity = Gravity.TOP or Gravity.START })
     }
 
     private fun positionActionBar() {
