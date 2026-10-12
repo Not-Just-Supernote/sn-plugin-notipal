@@ -117,16 +117,18 @@ android {
     buildToolsVersion rootProject.ext.buildToolsVersion
     compileSdk rootProject.ext.compileSdkVersion
 
-    namespace "com.supernote_quicktoolbar"
+    namespace "me.laumss.notipal"
     defaultConfig {
-        applicationId "com.supernote_quicktoolbar"
+        applicationId "me.laumss.notipal"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 1
         versionName "1.0"
 
+        
         ndk { abiFilters "arm64-v8a" }
 
+        
         externalNativeBuild {
             cmake {
                 arguments "-DANDROID_STL=c++_static"
@@ -148,6 +150,8 @@ android {
         }
     }
     buildTypes {
+        
+        
         def inklingDbg = findProperty("inklingEnableDebug")?.toString()?.toLowerCase()
         def debugEnableDebug = (inklingDbg == "false") ? "false" : "true"
         def releaseEnableDebug = (inklingDbg == "true") ? "true" : "false"
@@ -176,7 +180,7 @@ android {
 
 dependencies {
 
-    // Compose 1.6+ requires a SparseArrayCompat constructor unavailable in PluginHost.
+    
     def composeBom = platform("androidx.compose:compose-bom:2023.10.01")
     implementation(composeBom)
     implementation("androidx.compose.foundation:foundation")
@@ -189,6 +193,10 @@ dependencies {
     implementation("org.java-websocket:Java-WebSocket:1.5.7")
 
     implementation("com.facebook.react:react-android")
+
+    
+    
+    compileOnly files("$rootDir/../node_modules/sn-plugin-lib/android/libs/plugincommonlib.aar")
 
     if (hermesEnabled.toBoolean()) {
         implementation("com.facebook.react:hermes-android")

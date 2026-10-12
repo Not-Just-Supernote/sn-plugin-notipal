@@ -1,14 +1,20 @@
 import { NativeModules } from 'react-native';
-import { PluginCommAPI, PluginFileAPI, PluginNoteAPI, PointUtils } from 'sn-plugin-lib';
+import { PluginCommAPI, PluginFileAPI, PluginNoteAPI } from 'sn-plugin-lib';
 import { getRNFS } from './rnfs';
 import { FileLogger } from './FileLogger';
+import { SelectionPage, readSelectionPage, isSameSelectionPage, validSelectionRect } from './PenTools';
 
 const { AIRelayModule, FloatingToolbar, TextLayoutEngine } = NativeModules;
 
 const STAGE_DIR = '/sdcard/EXPORT/lasso_ai';
+
 const FORMULA_PX_PER_EM = 72;
-const FORMULA_CTX_STORE_KEY = 97;
+
+const FORMULA_CTX_STORE_KEY = 94;
+
 const FORMULA_CAPTURE_MARGIN = 120;
+
+
 
 export const FORMULA_PROMPT =
   '请识别图片中的手写内容（数学公式和文字）。严格按以下格式输出：\n' +
@@ -29,22 +35,25 @@ export const FORMULA_PROMPT =
   '\n' +
   '除以上两个小节外不要输出任何其他内容，不要使用代码块。';
 
+
 interface FormulaStroke {
   w: number;
   pts: number[];
 }
 
+
 interface RenderedFormula {
   width: number;
   height: number;
   em: number;
-  png: string;
+  png: string; 
   strokes?: FormulaStroke[];
 }
 
 export interface FormulaBlock {
   type: 'math' | 'text';
   content: string;
+  
   image?: RenderedFormula;
 }
 
@@ -55,6 +64,9 @@ interface ReplaceContext {
   rect: { left: number; top: number; right: number; bottom: number };
   createdAt: number;
 }
+
+
+
 
 let _ctx: ReplaceContext | null = null;
 const CTX_TTL_MS = 30 * 60_000;
@@ -67,18 +79,21 @@ async function loadCtx(): Promise<ReplaceContext | null> {
   if (_ctx) return _ctx;
   try {
     const raw: string | null = await FloatingToolbar?.loadPreset(FORMULA_CTX_STORE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (parsed && Array.isArray(parsed.elementNums) && parsed.rect) {
-        _ctx = parsed as ReplaceContext;
-      }
+    const parsed = raw ? JSON.parse(raw) : null;
+    if (parsed && typeof parsed.filePath === 'string' && Number.isInteger(parsed.pageNum) &&
+        Number.isFinite(parsed.createdAt) && Array.isArray(parsed.elementNums) && validSelectionRect(parsed.rect)) {
+      _ctx = parsed as ReplaceContext;
     }
   } catch (_) {}
   return _ctx;
 }
 
-export async function sendFormulaQuery(): Promise<'ok' | 'no-lasso' | 'no-relay' | 'error'> {
+
+
+export async function sendFormulaQuery(request?: { expectedPage?: SelectionPage; canContinue?: () => boolean }): Promise<'ok' | 'no-lasso' | 'no-relay' | 'error'> {
   try {
+    
+    
     try {
       const ping: string = await AIRelayModule.pingRelay();
       if (ping !== '1') {
@@ -90,13 +105,16 @@ export async function sendFormulaQuery(): Promise<'ok' | 'no-lasso' | 'no-relay'
       return 'no-relay';
     }
 
-    const [fpRes, pgRes]: any[] = await Promise.all([
-      PluginCommAPI.getCurrentFilePath(),
-      PluginCommAPI.getCurrentPageNum(),
-    ]);
-    if (!fpRes?.success || !pgRes?.success) return 'error';
-    const filePath = fpRes.result as string;
-    const pageNum = pgRes.result as number;
+    const page = request?.expectedPage ?? await readSelectionPage();
+    const canContinue = () => !request?.canContinue || request.canContinue();
+    const isCurrent = async () => {
+      if (!page || !canContinue()) return false;
+      const matches = await isSameSelectionPage(page);
+      return matches && canContinue();
+    };
+    if (!page || !await isCurrent()) return 'error';
+    const filePath = page.filePath;
+    const pageNum = page.pageNum;
 
     const elementNums: number[] = [];
     try {
@@ -116,8 +134,9 @@ export async function sendFormulaQuery(): Promise<'ok' | 'no-lasso' | 'no-relay'
       return 'no-lasso';
     }
 
+    
     const lr: any = await (PluginCommAPI as any).getLassoRect();
-    if (!lr?.success || !lr.result || typeof lr.result.left !== 'number') {
+    if (!lr?.success || !validSelectionRect(lr.result)) {
       FileLogger.logEvent('FormulaSend', `getLassoRect failed: ${lr?.error?.message ?? 'unknown'}`);
       return 'error';
     }
@@ -126,19 +145,21 @@ export async function sendFormulaQuery(): Promise<'ok' | 'no-lasso' | 'no-relay'
       right: lr.result.right, bottom: lr.result.bottom,
     };
 
-    _ctx = { filePath, pageNum, elementNums, rect, createdAt: Date.now() };
-    saveCtx();
-
-    try { await (PluginCommAPI as any).setLassoBoxState?.(2); } catch (_) {}
-    await new Promise<void>(res => setTimeout(res, 500));
-
-    const capPath = `${STAGE_DIR}/formula_query.png`;
-    const captured: string | null = await AIRelayModule.captureScreenRegion(
-      rect.left, rect.top, rect.right, rect.bottom, FORMULA_CAPTURE_MARGIN, capPath);
-    if (!captured) {
-      FileLogger.logEvent('FormulaSend', 'captureScreenRegion failed');
+    
+    
+    if (!await isCurrent()) return 'error';
+    const capPath = `${STAGE_DIR}/formula_query_${Date.now()}.png`;
+    const captured: string | null = await AIRelayModule.capturePageRegion(
+      rect.left, rect.top, rect.right, rect.bottom, FORMULA_CAPTURE_MARGIN, capPath,
+      filePath, pageNum, page.width, page.height);
+    if (!captured || !await isCurrent()) {
+      FileLogger.logEvent('FormulaSend', 'live page capture / context check ended');
       return 'error';
     }
+    try { await (PluginCommAPI as any).setLassoBoxState?.(2); } catch (_) {}
+    if (!await isCurrent()) return 'error';
+    _ctx = { filePath, pageNum, elementNums, rect, createdAt: Date.now() };
+    saveCtx();
 
     try { AIRelayModule.sendAlive?.(); } catch (_) {}
     AIRelayModule.sendImageQueryKind(captured, '', FORMULA_PROMPT, 'formula');
@@ -151,6 +172,8 @@ export async function sendFormulaQuery(): Promise<'ok' | 'no-lasso' | 'no-relay'
     return 'error';
   }
 }
+
+
 
 function parseBlocks(blocksJson: string): FormulaBlock[] {
   try {
@@ -187,12 +210,16 @@ function parseBlocks(blocksJson: string): FormulaBlock[] {
 
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 
+
 const MAX_STROKE_ELEMENTS = 240;
-const STROKE_PRESSURE = 1000; // 0–4096
+const STROKE_PRESSURE = 1000; 
 const PEN_TYPE_FINELINER = 10;
-const FORMULA_THICKNESS_FACTOR = 130; // raw = FILL_PEN_PX * sy * factor
-const FORMULA_THICKNESS_MIN = 300;
-const FORMULA_THICKNESS_MAX = 900;
+
+
+const FORMULA_THICKNESS_FACTOR = 130; 
+const FORMULA_THICKNESS_MIN = 300;    
+const FORMULA_THICKNESS_MAX = 900;    
+
 
 async function insertFormulaStrokes(
   img: RenderedFormula,
@@ -214,6 +241,7 @@ async function insertFormulaStrokes(
       return false;
     }
 
+    
     const sx = (target.right - target.left) / img.width;
     const sy = (target.bottom - target.top) / img.height;
 
@@ -227,16 +255,18 @@ async function insertFormulaStrokes(
       }
       const el: any = createRes.result;
 
-      const emrPoints: any[] = [];
+      const androidPoints: any[] = [];
       const pressures: number[] = [];
       for (let i = 0; i + 1 < s.pts.length; i += 2) {
         const px = target.left + s.pts[i] * sx;
         const py = target.top + s.pts[i + 1] * sy;
-        emrPoints.push(PointUtils.androidPoint2Emr(
-          { x: Math.round(px), y: Math.round(py) }, pageSize));
+        
+        
+        
+        androidPoints.push({ x: Math.round(px), y: Math.round(py) });
         pressures.push(STROKE_PRESSURE);
       }
-      if (emrPoints.length < 2) continue;
+      if (androidPoints.length < 2) continue;
 
       el.thickness = Math.max(FORMULA_THICKNESS_MIN,
         Math.min(FORMULA_THICKNESS_MAX, Math.round(s.w * sy * FORMULA_THICKNESS_FACTOR)));
@@ -246,7 +276,7 @@ async function insertFormulaStrokes(
       }
       el.stroke.penColor = 0;
       el.stroke.penType = PEN_TYPE_FINELINER;
-      const okPts = await el.stroke.points.setRange(0, emrPoints.length - 1, emrPoints);
+      const okPts = await el.stroke.points.setRange(0, androidPoints.length - 1, androidPoints);
       const okPrs = await el.stroke.pressures.setRange(0, pressures.length - 1, pressures);
       if (!okPts || !okPrs) {
         FileLogger.logEvent('FormulaInsert', `setRange failed pts=${okPts} prs=${okPrs}`);
@@ -266,10 +296,15 @@ async function insertFormulaStrokes(
       `ink placed: ${elements.length} strokes rect=${JSON.stringify(target)}`);
     return true;
   } catch (e) {
+    
+    
+    
+    
     FileLogger.logEvent('FormulaInsert', `stroke insert threw: ${String(e)}`);
     throw e;
   }
 }
+
 
 async function insertFormulaImage(img: RenderedFormula): Promise<boolean> {
   const pngPath = `${STAGE_DIR}/formula_insert.png`;
@@ -297,17 +332,26 @@ async function insertFormulaImage(img: RenderedFormula): Promise<boolean> {
   }
 }
 
-const NOTE_LINE_H = 42;
-const BOX_TOP_INSET = 14;
-const NOTE_RENDER_PAD = 28;
-const WIDTH_ADJUSTMENT = 30;
+
+
+
+
+
+const NOTE_LINE_H = 42;       
+const BOX_TOP_INSET = 14;     
+const NOTE_RENDER_PAD = 28;   
+const WIDTH_ADJUSTMENT = 30;  
 const TOP_MARGIN_BASE = 150;
 const BASE_PAGE_HEIGHT = 1872;
 const FONT_SIZE = 36;
-const FORMULA_GAP_PAD = 8;
-const INLINE_MAX_H = 58;
-const INLINE_PAD = 10;
-const TEXT_X_INSET = 15;
+const FORMULA_GAP_PAD = 8;    
+
+
+
+const INLINE_MAX_H = 58;      
+const INLINE_PAD = 10;        
+const TEXT_X_INSET = 15;      
+
 
 function cleanNoteLines(raw: string): string[] {
   let text = raw.replace(/^#{1,6}\s+/gm, '');
@@ -334,19 +378,24 @@ function cleanNoteLines(raw: string): string[] {
 
 interface EmbeddedMathSlot {
   block: FormulaBlock;
-  w: number;
-  h: number;
-  inline: boolean;
-  lines: number;
-  charOffset: number;
-  phEnd: number;
-  line?: number;
-  x?: number;
-  _lineArr?: number;
-  _col?: number;
+  w: number;          // 公式显示宽（页面 px）
+  h: number;          // 公式显示高（页面 px）
+  inline: boolean;    // true=行内空格占位；false=独立空行占位
+  lines: number;      // block 形态的占位空行数 k
+  charOffset: number; // 占位起点在合并文本中的字符偏移
+  phEnd: number;      // inline 形态的占位终点偏移（起点+空格数）
+  line?: number;      // inline 测量结果：渲染行号
+  x?: number;         // inline 测量结果：行内水平像素位置
+  _lineArr?: number;  // 构建期：所在 lines[] 下标
+  _col?: number;      // 构建期：行内字符列
   _colEnd?: number;
 }
 
+/**
+ * 按 [inlinePlan]（每个 math 块是否尝试行内）构建合并文本。行内公式在
+ * 前后文本之间插空格串占位（后续文本接同一行），独立公式占 k 个空行。
+ * 占位跨行/超宽由调用方测量后降级重建。
+ */
 function buildMergedText(
   blocks: FormulaBlock[],
   inlinePlan: boolean[],
@@ -403,7 +452,7 @@ function buildMergedText(
       const tl = cleanNoteLines(b.content);
       tl.forEach((ln, i) => {
         if (i === 0 && prev === 'inlineMath') {
-          cur += ln;
+          cur += ln; // 行内公式后的文字接同一行
         } else {
           flush();
           cur = ln;
@@ -415,6 +464,7 @@ function buildMergedText(
   flush();
   if (slots.length === 0 && lines.every(l => l.trim().length === 0)) return null;
 
+  // 行号/列 → 合并文本字符偏移。
   const lineOffsets: number[] = [];
   { let off = 0; for (const l of lines) { lineOffsets.push(off); off += l.length + 1; } }
   for (const s of slots) {
@@ -425,12 +475,18 @@ function buildMergedText(
   return { merged: lines.join('\n'), slots };
 }
 
+/**
+ * 嵌入式插入：合并文本 + 占位 → 单次 insertText → 逐公式落笔迹。
+ * 返回文本框 bottom（页面 px）；页面放不下/前置条件不满足返回 null，
+ * 由调用方回退交错插入。插入过程中的宿主异常向上抛（与交错路径同语义）。
+ */
 async function insertEmbeddedBlocks(
   blocks: FormulaBlock[],
   area: { left: number; top: number; width: number },
   filePath: string,
   pageNum: number,
 ): Promise<number | null> {
+  // 全部 math 块都要有折线（图片兜底无法定位，破坏嵌入布局）。
   if (!blocks.every(b => b.type !== 'math' || (b.image?.strokes?.length ?? 0) > 0)) {
     FileLogger.logEvent('FormulaEmbed', 'math without strokes — fallback to interleaved');
     return null;
@@ -440,7 +496,9 @@ async function insertEmbeddedBlocks(
   const pageSize = psRes?.result;
   if (!psRes?.success || !pageSize?.width || !pageSize?.height) return null;
 
-  const innerWidth = Math.max(64, area.width - 16);
+  // 1) 合并文本：矮公式先按行内计划构建，测量验证占位没被折行/超宽，
+  //    违反则降级为独立占位行重建（最多 math 块数 + 1 轮）。
+  const innerWidth = Math.max(64, area.width - 16); // 笔迹左右各留 8px
   const measureWidth = Math.max(24, area.width - WIDTH_ADJUSTMENT);
 
   const pre: any = await TextLayoutEngine.measureLineStarts({ text: ' ', boxWidth: area.width });
@@ -493,6 +551,7 @@ async function insertEmbeddedBlocks(
   const lineCount: number = measure?.lineCount ?? 0;
   if (lineCount <= 0 || lineStarts.length === 0) return null;
 
+  // 3) 布局与页面校验。
   const boxH = (measure.nativeHeight ?? lineCount * NOTE_LINE_H) + NOTE_RENDER_PAD;
   const topMargin = Math.round(TOP_MARGIN_BASE * (pageSize.height / BASE_PAGE_HEIGHT));
   const top = Math.max(topMargin, Math.round(area.top));
@@ -502,6 +561,8 @@ async function insertEmbeddedBlocks(
     return null;
   }
 
+  // 占位首行的渲染行号：空行不折行，charOffset 与某个 lineStart 精确相等；
+  // 容错取"最后一个 <= offset 的行"。
   const renderedLineOf = (offset: number): number => {
     let idx = 0;
     for (let i = 0; i < lineStarts.length; i++) {
@@ -510,6 +571,7 @@ async function insertEmbeddedBlocks(
     return idx;
   };
 
+  // 4) 插入文本框（直接调 SDK，绕过 TextInserter 的空行过滤）。
   const rect = {
     left: Math.round(area.left), top,
     right: Math.round(area.left + area.width), bottom: top + boxH,
@@ -528,6 +590,8 @@ async function insertEmbeddedBlocks(
   FileLogger.logEvent('FormulaEmbed',
     `box placed rect=${JSON.stringify(rect)} lines=${lineCount} slots=${slots.length}`);
 
+  // 5) 公式笔迹落进占位区：block 形态在 k 行区域垂直居中；inline 形态
+  //    在占位空格串位置、所在行中线对齐（可轻微越入行间空隙）。
   for (const s of slots) {
     let target: { left: number; top: number; right: number; bottom: number };
     if (s.inline && s.line != null && s.x != null) {
@@ -549,6 +613,7 @@ async function insertEmbeddedBlocks(
     }
     const placed = await insertFormulaStrokes(s.block.image!, target, filePath, pageNum);
     if (!placed) {
+      // 文本框已就位，占位区留白比中止更可恢复；记日志继续。
       FileLogger.logEvent('FormulaEmbed',
         `stroke slot failed (inline=${s.inline}) rect=${JSON.stringify(target)} — gap left blank`);
     }
@@ -558,12 +623,37 @@ async function insertEmbeddedBlocks(
 
 export interface ProcessBlocksOptions {
   replace: boolean;
+  /**
+   * 文本块的落点：交给 TextInserter。anchorTop/anchorLeft 是该文本段的
+   * 起始位置（页面坐标，通常在前一个公式笔迹下方）。processRelayBlocks
+   * 现在恒传非空锚点（无套索矩形时用 inserter 基线），保证接收悬浮窗
+   * 始终被创建并跟随插入位置。
+   */
   insertText: (text: string, anchorTop: number | null, anchorLeft: number | null) => void;
+  /**
+   * 等待 TextInserter 队列落定（文本框真正写进笔记），返回落定后的下一
+   * 插入 y（页面像素）——后续公式笔迹据此排在文本框下方，避免重叠。
+   * 无 inserter 时返回 null。
+   */
   waitTextIdle: () => Promise<number | null>;
   onStatus?: (msg: 'rendering' | 'inserting' | 'done' | 'failed') => void;
+  /**
+   * 嵌入式路径成功后回调（bottom = 文本框底、left = 文本框左）：调用方
+   * 据此推进 TextInserter 的 nextTop（嵌入插入绕过其队列，不回调则后续
+   * 普通文本会砸在公式框上）。
+   */
   onEmbedded?: (bottom: number, left: number) => void;
 }
 
+/**
+ * 处理 relay 详情页发来的 blocks：math → 真笔画元素插入（折线缺失或失败
+ * 时退回 PNG 图片），text → insertText 回调。replace=true 时先删除发送时
+ * 套索的原手写，公式落在原套索矩形处；否则落在套索矩形下方。
+ *
+ * 按文档顺序交错插入：文本 → 等文本框落定（waitTextIdle 返回其下方 y）→
+ * 公式笔迹 → 后续文本锚到公式下方 …… 保持阅读顺序且互不重叠（原实现把
+ * 所有文本合并甩在全部公式之后）。
+ */
 export async function processRelayBlocks(
   blocksJson: string,
   opts: ProcessBlocksOptions,
@@ -571,6 +661,8 @@ export async function processRelayBlocks(
   const blocks = parseBlocks(blocksJson);
   if (blocks.length === 0) return false;
 
+  // relay 端渲染失败的 math 块不带 image：整体失败，不做文本兜底、
+  // 不删原手写（防止把 LaTeX 源码插进笔记）。
   if (blocks.some(b => b.type === 'math' && !b.image)) {
     FileLogger.logEvent('FormulaInsert', 'math block without image — abort');
     opts.onStatus?.('failed');
@@ -588,6 +680,8 @@ export async function processRelayBlocks(
   const filePath = fpRes.result as string;
   const pageNum = pgRes.result as number;
 
+  // 替换要求还在发送时的那一页、且原手写元素尚未被删过（替换消费
+  // elementNums 但保留 rect，见文末）；不满足则退化为普通插入。
   const canReplace = opts.replace && ctx != null
     && ctx.elementNums.length > 0
     && ctx.filePath === filePath && ctx.pageNum === pageNum;
@@ -595,6 +689,7 @@ export async function processRelayBlocks(
     FileLogger.logEvent('FormulaInsert', 'replace ctx missing/mismatch — fallback to insert');
   }
 
+  // 布局参考矩形：替换用原套索矩形；插入用其下方同宽区域。
   const FALLBACK_W = 700;
   const refRect = ctx?.rect ?? null;
   const areaLeft = refRect ? refRect.left : 120;
@@ -604,6 +699,7 @@ export async function processRelayBlocks(
   let cursorY = canReplace
     ? (refRect ? refRect.top : 200)
     : (refRect ? refRect.bottom + 40 : 200);
+  // 无套索上下文时以 TextInserter 当前光标为基准，公式不砸在已有文本流上。
   if (!refRect) {
     const base = await opts.waitTextIdle();
     if (base != null) cursorY = Math.max(cursorY, base);
@@ -611,6 +707,7 @@ export async function processRelayBlocks(
 
   opts.onStatus?.('inserting');
 
+  // 替换：先删原手写。
   if (canReplace && ctx) {
     try {
       const del: any = await PluginFileAPI.deleteElements(filePath, pageNum, ctx.elementNums);
@@ -621,6 +718,8 @@ export async function processRelayBlocks(
     }
   }
 
+  // 优先嵌入式：单文本框 + 占位空行 + 行内公式笔迹（无碎片）。
+  // 失败条件（math 缺折线 / 页面放不下 / 测量或插入失败）回退交错插入。
   try {
     const embeddedBottom = await insertEmbeddedBlocks(
       blocks,
@@ -634,6 +733,7 @@ export async function processRelayBlocks(
       return true;
     }
   } catch (e) {
+    // 宿主通信层异常（多为笔记进程崩溃）：与交错路径同语义，整体中止。
     FileLogger.logEvent('FormulaEmbed', `abort: host comm failure — ${String(e)}`);
     opts.onStatus?.('failed');
     return false;
@@ -643,8 +743,12 @@ export async function processRelayBlocks(
   let ok = true;
 
   for (const b of blocks) {
+    // 折线由 relay 端 MathJax SVG 采样而来（插件进程禁 WebView），这里
+    // 走官方 createElement/insertElements 变成真笔迹；无折线或插入失败
+    // 时退回 PNG 图片插入。
     if (b.type === 'math' && b.image) {
       const img = b.image;
+      // 目标尺寸：按固定字号（px/em）定高，宽超出参考区域时整体缩小。
       let h = Math.max(32, Math.round(img.em * FORMULA_PX_PER_EM));
       let w = Math.round(h * img.width / img.height);
       if (w > areaWidth) {
@@ -661,6 +765,7 @@ export async function processRelayBlocks(
       try {
         placed = await insertFormulaStrokes(img, target, filePath, pageNum);
       } catch (e) {
+        // 宿主通信层异常（多为笔记进程崩溃）：整体中止，不做图片兜底。
         FileLogger.logEvent('FormulaInsert', `abort: host comm failure — ${String(e)}`);
         ok = false;
         break;
@@ -669,6 +774,11 @@ export async function processRelayBlocks(
       if (!placed) { ok = false; break; }
       cursorY += h + GAP;
     } else if (b.type === 'text') {
+      // 文本段锚在当前 cursorY（即前一个公式笔迹下方）；等文本框真正
+      // 落进笔记后取 TextInserter 的下一插入 y 作为后续公式的基线——
+      // 文本框高度只有插入后才可知，不等就会砸在文本上。
+      // 锚点恒传（无套索矩形时用 inserter 基线 + 默认左边距）：接收
+      // 悬浮窗跟着锚点创建/移动，否则公式流程里它可能根本不出现。
       try {
         opts.insertText(
           b.content,
@@ -684,6 +794,8 @@ export async function processRelayBlocks(
     }
   }
 
+  // 替换只消费 elementNums（防误删两次），保留 rect：用户先"替换手写"
+  // 再"插入"解答时，插入仍能锚到原套索区域下方、接收悬浮窗跟随其位置。
   if (canReplace && _ctx) { _ctx = { ..._ctx, elementNums: [] }; saveCtx(); }
 
   opts.onStatus?.(ok ? 'done' : 'failed');

@@ -19,9 +19,6 @@ buildscript {
     }
 }
 
-apply plugin: "com.facebook.react.rootproject"
-
-
 def isWindows = System.getProperty('os.name').toLowerCase().contains('windows')
 def localProps = file("${rootDir}/local.properties")
 def lines = []
@@ -33,6 +30,8 @@ if (isWindows) {
     lines << 'cmake.dir=/usr'
 }
 localProps.text = lines.join('\n') + '\n'
+
+apply plugin: "com.facebook.react.rootproject"
 
 subprojects { subproject ->
     def applyNdk = {

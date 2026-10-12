@@ -14,6 +14,12 @@ function getBubbleEmitter(): NativeEventEmitter | null {
 const FloatingBubbleBridge = {
   isAvailable: !!FloatingBubble,
 
+  remember(statusText: string, mode?: string): void {
+    try { FloatingBubble?.remember(statusText, mode ?? ''); } catch (e) {
+      console.warn('[FloatingBubbleBridge]: remember failed:', e);
+    }
+  },
+
   show(statusText: string, mode?: string): void {
     console.log('[BUBBLE-DBG/JS] bridge.show statusText=', statusText, 'mode=', mode, 'nativeAvailable=', !!FloatingBubble);
     try { FloatingBubble?.show(statusText, mode ?? ''); } catch (e) {
@@ -34,7 +40,7 @@ const FloatingBubbleBridge = {
     }
   },
 
-  /** Toggle the "text card waiting to be inserted" texture on the receiver bubble. */
+  
   setPending(pending: boolean): void {
     try { FloatingBubble?.setPending(pending); } catch (_) {}
   },
@@ -51,7 +57,7 @@ const FloatingBubbleBridge = {
     screenY: number; pageY: number;
     screenX: number; pageX: number;
     screenBottomY: number; pageBottomY: number;
-    bubbleHeight: number;
+    bubbleHeight: number; bubbleWidth: number;
   }) => void): { remove(): void } {
     const em = getBubbleEmitter();
     if (!em) return { remove() {} };
@@ -69,8 +75,16 @@ const FloatingBubbleBridge = {
         screenBottomY: event?.screenBottomY ?? event?.screenY ?? 0,
         pageBottomY: pbY,
         bubbleHeight: bh,
+        bubbleWidth: event?.bubbleWidth ?? 0,
       });
     });
+  },
+
+  
+  onLongPress(callback: () => void): { remove(): void } {
+    const em = getBubbleEmitter();
+    if (!em) return { remove() {} };
+    return em.addListener('onBubbleLongPress', callback);
   },
 
   onDragEnd(callback: (data: {
@@ -148,13 +162,7 @@ const AiBubbleBridge = {
     }
   },
 
-  /** Open the AI entry as the collected single-button form (does not start AIRelay). */
-  showCollapsed(statusText: string): void {
-    try { AiBubble?.showCollapsed(statusText); } catch (e) {
-      console.warn('[AiBubbleBridge]: showCollapsed failed:', e);
-    }
-  },
-
+  
   hide(): void {
     try { AiBubble?.hide(); } catch (e) {
       console.warn('[AiBubbleBridge]: hide failed:', e);
@@ -167,17 +175,26 @@ const AiBubbleBridge = {
     }
   },
 
+  
+  flashText(text: string, durationMs: number, thenText: string): void {
+    try {
+      AiBubble?.flashText(text, durationMs, thenText);
+    } catch (e) {
+      console.warn('[AiBubbleBridge]: flashText failed:', e);
+    }
+  },
+
   setPageHeight(height: number): void {
     try { AiBubble?.setPageHeight(height); } catch (_) {}
   },
 
-  setActionButtons(buttons: { id: string; icon: string; label: string }[]): void {
+  setActionButtons(buttons: import('./ToolPresets').BubbleAction[]): void {
     try { AiBubble?.setActionButtons(JSON.stringify(buttons)); } catch (e) {
       console.warn('[AiBubbleBridge]: setActionButtons failed:', e);
     }
   },
 
-  /** Relay inbox previews → capsule bars under the status pill. */
+  
   setInboxItems(
     items: { id: string; title: string; preview: string; source: string; time: number; pinned?: boolean }[],
   ): void {
@@ -186,25 +203,20 @@ const AiBubbleBridge = {
     }
   },
 
-  onLongPress(cb: () => void): { remove(): void } {
-    return getAiEmitter()?.addListener('onAiBubbleLongPress', cb) ?? { remove() {} };
-  },
-
   onAction(cb: (e: { actionId: string }) => void): { remove(): void } {
     return getAiEmitter()?.addListener('onAiBubbleAction', cb) ?? { remove() {} };
   },
 
-  /** Tap on the collected single-button form: start AIRelay, then expand. */
-  onExpand(cb: () => void): { remove(): void } {
-    return getAiEmitter()?.addListener('onAiBubbleExpand', cb) ?? { remove() {} };
+  
+  onActionMode(cb: (e: { actionId: string; mode: string }) => void): { remove(): void } {
+    return getAiEmitter()?.addListener('onAiBubbleActionMode', cb) ?? { remove() {} };
   },
 
-  /** Tap on a capsule bar: open that message's translucent detail page. */
   onCapsuleTap(cb: (e: { id: string }) => void): { remove(): void } {
     return getAiEmitter()?.addListener('onAiCapsuleTap', cb) ?? { remove() {} };
   },
 
-  /** Long-press on a capsule bar: insert that message directly. */
+  
   onCapsuleLongPress(cb: (e: { id: string }) => void): { remove(): void } {
     return getAiEmitter()?.addListener('onAiCapsuleLongPress', cb) ?? { remove() {} };
   },
@@ -225,6 +237,19 @@ const PaletteBubbleBridge = {
   show(): void {
     try { PaletteBubble?.show(); } catch (e) {
       console.warn('[PaletteBubbleBridge]: show failed:', e);
+    }
+  },
+
+  
+  hideTemporarily(): void {
+    try { PaletteBubble?.hideTemporarily?.(); } catch (e) {
+      console.warn('[PaletteBubbleBridge]: hideTemporarily failed:', e);
+    }
+  },
+
+  restore(): void {
+    try { PaletteBubble?.restore?.(); } catch (e) {
+      console.warn('[PaletteBubbleBridge]: restore failed:', e);
     }
   },
 

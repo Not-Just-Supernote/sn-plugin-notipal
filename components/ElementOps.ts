@@ -1,4 +1,4 @@
-import { PluginCommAPI } from 'sn-plugin-lib';
+import { PluginCommAPI, PluginNoteAPI, PluginFileAPI } from 'sn-plugin-lib';
 
 const TAG = '[ElementOps]';
 const MARKER_PT = 11;
@@ -12,12 +12,18 @@ function asLayer(el: any): number {
   return typeof n === 'number' && n >= 0 && n <= 3 ? n : 0;
 }
 
-/** Docs: current-page element APIs must call getPageDisplaySize first, not FileAPI.getPageSize. */
-export async function primePageDisplaySize(): Promise<void> {
+
+export async function saveCurrentPage(reason: string): Promise<boolean> {
   try {
-    await PluginCommAPI.getPageDisplaySize();
+    const res: any = await PluginNoteAPI.saveCurrentNote();
+    if (res?.success === false) {
+      console.warn(TAG, `saveCurrentNote failed reason=${reason}`, res.error);
+      return false;
+    }
+    return true;
   } catch (e) {
-    console.warn(TAG, 'getPageDisplaySize failed:', e);
+    console.warn(TAG, `saveCurrentNote error reason=${reason}:`, e);
+    return false;
   }
 }
 
@@ -32,13 +38,9 @@ function groupByLayer(elements: any[]): Map<number, any[]> {
   return groups;
 }
 
-/**
- * Modify existing elements on the currently open page.
- * Host matches by numInPage within the given layer — mixed-layer batches must be split.
- */
+
 export async function modifyLiveElements(elements: any[], page: number): Promise<any> {
   if (!elements.length) return { success: true, result: [] };
-  await primePageDisplaySize();
   const modified: number[] = [];
   for (const [layer, els] of groupByLayer(elements)) {
     console.log(TAG, `modifyPageElements n=${els.length} page=${page} layer=${layer}`);
@@ -50,46 +52,25 @@ export async function modifyLiveElements(elements: any[], page: number): Promise
   return { success: true, result: modified };
 }
 
-/**
- * Move elements across layers on the currently open page.
- * batchUpdatePageElements cannot change layers (delete nums must already sit on the
- * target layer). Insert first so a failed insert leaves originals intact, then delete.
- */
-export async function moveLiveElements(
+
+
+
+
+
+
+export async function modifyFileElements(
+  filePath: string,
   page: number,
-  toInsertByTargetLayer: Map<number, any[]>,
-  toDeleteBySourceLayer: Map<number, number[]>,
-): Promise<{ ok: boolean; error?: string }> {
-  await primePageDisplaySize();
-
-  for (const [layer, els] of toInsertByTargetLayer) {
-    if (!els.length) continue;
-    console.log(TAG, `insertPageElements n=${els.length} page=${page} layer=${layer}`);
-    const res: any = await PluginCommAPI.insertPageElements(els, page, layer);
-    console.log(TAG, `insertPageElements ok=${res?.success} err=${res?.error?.message ?? ''}`);
-    if (!res?.success) {
-      return { ok: false, error: res?.error?.message ?? 'insertPageElements failed' };
-    }
-  }
-
-  for (const [layer, nums] of toDeleteBySourceLayer) {
-    if (!nums.length) continue;
-    console.log(TAG, `deletePageElements n=${nums.length} page=${page} layer=${layer}`);
-    const res: any = await PluginCommAPI.deletePageElements(nums, page, layer);
-    console.log(TAG, `deletePageElements ok=${res?.success} err=${res?.error?.message ?? ''}`);
-    if (!res?.success) {
-      return { ok: false, error: res?.error?.message ?? 'deletePageElements failed' };
-    }
-  }
-
-  return { ok: true };
+  elements: any[],
+): Promise<any> {
+  if (!elements.length) return { success: true, result: [] };
+  console.log(TAG, `modifyElements(file) n=${elements.length} page=${page}`);
+  const res: any = await (PluginFileAPI as any).modifyElements(filePath, page, elements);
+  console.log(TAG, `modifyElements(file) ok=${res?.success} err=${res?.error?.message ?? ''} result=${JSON.stringify(res?.result)}`);
+  return res;
 }
 
-/**
- * Marker strokes need markPenDirection in the native cache. Converting a needle/ball
- * stroke to penType 11 with an empty direction list makes the host wipe the stroke,
- * after which later modifies of the same page also fail.
- */
+
 export async function ensureMarkerDirection(el: any): Promise<void> {
   const stroke = el?.stroke;
   if (!stroke || el?.type !== 0) return;

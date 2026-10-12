@@ -2,17 +2,33 @@
 
 import { AppRegistry, Image, DeviceEventEmitter } from 'react-native';
 import App from './App';
-import { name as appName } from './app.json';
-import { PluginManager, NativeUIUtils, FileUtils } from 'sn-plugin-lib';
-import { ensureInit, stopAllModes, startLocalSend, stopLocalSend, isLocalSendRunning } from './components/BackgroundService';
+import { PluginManager, PluginDocAPI, FileUtils } from 'sn-plugin-lib';
+import { ensureInit, stopAllModes, startLocalSend, stopLocalSend } from './components/BackgroundService';
 import { PluginCommAPI } from 'sn-plugin-lib';
-import { setPendingButton, isAppMounted, markHostButtonEvent } from './pendingButton';
-import { loadClips } from './components/ToolPresets';
-import FloatingToolbarBridge, { ENABLE_DEBUG } from './components/FloatingToolbarBridge';
+import { loadClips, clipFilledFlags } from './components/ToolPresets';
+import FloatingToolbarBridge, {
+  ENABLE_DEBUG,
+  setPendingButton,
+  isAppMounted,
+  markHostButtonEvent,
+  markHostButtonHandled,
+} from './components/FloatingToolbarBridge';
 import LocalSendBridge from './components/LocalSendBridge';
 import { executeAction } from './components/ToolActions';
-import { setLocale, getLocale, t } from './components/i18n';
-import { ensureInitialPermissions } from './components/PermissionCoordinator';
+import { setLocale, getLocale } from './components/i18n';
+import { getRNFS } from './components/rnfs';
+
+const DOC_SEND_BUTTON_ID = 301;
+let docSendBusy = false;
+
+function registerDocSendButton() {
+  PluginManager.registerButton(3, ['DOC'], {
+    id: DOC_SEND_BUTTON_ID,
+    name: getLocale() === 'zh' ? '发给其他设备' : 'Send to other devices',
+    icon: Image.resolveAssetSource(require('./assets/smart_lasso.png')).uri,
+    showType: 0,
+  });
+}
 
 if (!ENABLE_DEBUG) {
   console.log = () => {};
@@ -21,18 +37,44 @@ if (!ENABLE_DEBUG) {
   console.debug = () => {};
 }
 
-AppRegistry.registerComponent(appName, () => App);
+AppRegistry.registerComponent('me_laumss_notipal', () => App);
 
 PluginManager.init();
 setLocale(getLocale());
+
+
+
+
+
 ensureInit();
+reportPluginVersion();
 if (ENABLE_DEBUG) {
   const names = Object.keys(require('react-native').NativeModules || {});
   console.log('[index] FloatingToolbar available=', FloatingToolbarBridge.isAvailable, 'nativeModules=', names.join(','));
 }
 
+
+
+
+
+async function reportPluginVersion() {
+  try {
+    const dir = await PluginManager.getPluginDirPath();
+    const RNFS = getRNFS();
+    if (!dir || !RNFS) return;
+    const path = `${dir}/PluginConfig.json`;
+    if (!(await RNFS.exists(path))) return;
+    const cfg = JSON.parse(await RNFS.readFile(path, 'utf8'));
+    if (cfg && cfg.versionName) {
+      FloatingToolbarBridge.setPluginVersion(String(cfg.versionName), String(cfg.versionCode ?? ''));
+    }
+  } catch (e) {
+    console.warn('[index]: reportPluginVersion failed:', e);
+  }
+}
+
 DeviceEventEmitter.addListener('plugin_button_event', (msg) => {
-  markHostButtonEvent();
+  markHostButtonEvent(msg && msg.id);
   FloatingToolbarBridge.reportHostButtonChannel(true);
   FloatingToolbarBridge.reportHostButtonRaw('probe ' + JSON.stringify(msg));
   console.log('[index] raw plugin_button_event:', JSON.stringify(msg));
@@ -40,7 +82,7 @@ DeviceEventEmitter.addListener('plugin_button_event', (msg) => {
 async function refreshTitleClips() {
   try {
     const clips = await loadClips();
-    const filled = [1, 2, 3, 4, 5, 6].map(n => !!clips[String(n)]);
+    const filled = clipFilledFlags(clips);
     FloatingToolbarBridge.updateTitleClips(filled);
   } catch (e) {
     console.warn('[index]: refreshTitleClips failed:', e);
@@ -52,22 +94,9 @@ PluginManager.registerLangListener({
     const lang = msg.lang || '';
     const locale = lang.toLowerCase().startsWith('zh') ? 'zh' : 'en';
     setLocale(locale);
+    registerDocSendButton();
   },
 });
-
-const localSendButtonIcon = Image.resolveAssetSource(require('./assets/toolbar_icon.png')).uri;
-
-// Button name is fixed; don't encode toggle state in it. The host persists
-// registrations in its DB sorted by recentUsedTime, so a mutable name leaves
-// stale labels after restart. Toggle state is shown via post-tap tip instead.
-function registerLocalSendButton() {
-  PluginManager.registerButton(1, ['NOTE'], {
-    id: 200,
-    name: JSON.stringify({ en: 'LocalSend', zh_CN: 'LocalSend' }),
-    icon: localSendButtonIcon,
-    showType: 0,
-  });
-}
 
 DeviceEventEmitter.addListener('nativeDeleteFile', async (evt) => {
   if (evt && evt.path) {
@@ -80,8 +109,8 @@ DeviceEventEmitter.addListener('nativeDeleteFile', async (evt) => {
 });
 
 DeviceEventEmitter.addListener('startLocalSendFromNative', async (evt) => {
-  console.log('[index]: startLocalSendFromNative');
-  const ok = await startLocalSend();
+  console.log('[index]: startLocalSendFromNative silent=', !!(evt && evt.silent));
+  const ok = await startLocalSend(!(evt && evt.silent));
   if (ok && evt && evt.openClipboardSync) {
     FloatingToolbarBridge.openSendPanelClipboardSync();
   }
@@ -93,8 +122,9 @@ DeviceEventEmitter.addListener('clipsChanged', async () => {
 });
 
 FloatingToolbarBridge.onDestroyAll(() => {
-  console.log('[index]: onDestroyAll → stopAllModes');
+  console.log('[index]: onDestroyAll → stopAllModes + stopLocalSend');
   stopAllModes();
+  stopLocalSend();
 });
 
 FloatingToolbarBridge.onToolTap(async ({ toolAction }) => {
@@ -124,62 +154,68 @@ FloatingToolbarBridge.onToolLongPress(async ({ toolId }) => {
   }
 });
 
+FloatingToolbarBridge.onTitleClipLongPress(async ({ slot }) => {
+  const clips = await loadClips();
+  if (clips[slot]) {
+    await executeAction(`clip_clear_${slot}`);
+  } else {
+    const result = await executeAction(`clip_save_clear_${slot}`);
+    console.log('[index]: blank clip long press result=', result);
+  }
+  await refreshTitleClips();
+});
+
 PluginManager.registerButtonListener({
   async onButtonPress(event) {
     FloatingToolbarBridge.reportHostButtonRaw('listener id=' + (event && event.id));
-    console.log('[index]: button id=', event.id);
-
-    if (event.id === 100 || event.id === 200 || event.id === 300) {
-      setPendingButton(event.id);
-      const ready = await ensureInitialPermissions();
-      if (!ready) {
-        setPendingButton(null);
-        try { PluginManager.closePluginView(); } catch (_) {}
-        return;
-      }
-    }
-
-    if (event.id === 300) {
-      FloatingToolbarBridge.toggleScreenshotBubble();
-      setTimeout(() => {
-        try { PluginManager.closePluginView(); } catch (_) {}
-      }, 100);
+    const buttonId = Number(event && event.id);
+    if (!Number.isFinite(buttonId)) {
+      console.warn('[index]: ignored host button event without numeric id:', event);
       return;
     }
+    console.log('[index]: button id=', buttonId);
 
-    if (event.id === 200) {
-      (async () => {
-        try {
-          if (isLocalSendRunning()) {
-            await stopLocalSend();
-            NativeUIUtils.showErrorTipDialog(t('localsend_stopped'));
-          } else {
-            const wifi = await LocalSendBridge.isWifiConnected();
-            if (!wifi) {
-              NativeUIUtils.showErrorTipDialog(t('no_wifi'));
-              return;
-            }
-            const ok = await startLocalSend();
-            if (ok) NativeUIUtils.showErrorTipDialog(t('localsend_started'));
-          }
-        } catch (e) {
-          console.error('[index]: LocalSend toggle error:', e);
-        } finally {
-          setTimeout(() => {
-            try { PluginManager.closePluginView(); } catch (_) {}
-          }, 100);
+    if (buttonId === DOC_SEND_BUTTON_ID) {
+      markHostButtonHandled();
+      if (docSendBusy) return;
+      docSendBusy = true;
+      try {
+        const selection = await PluginDocAPI.getLastSelectedText();
+        const text = selection?.success && typeof selection.result === 'string'
+          ? selection.result : '';
+        if (text.trim() && await startLocalSend()) {
+          FloatingToolbarBridge.showDocTextSendPanel(text);
         }
-      })();
+      } catch (error) {
+        console.warn('[index]: document text send failed:', error);
+      } finally {
+        docSendBusy = false;
+      }
       return;
     }
 
-    if (event.id === 100) {
-      console.log('[index]: id=100 → toggle native toolbar available=', FloatingToolbarBridge.isAvailable, 'showing=', FloatingToolbarBridge.isShowingSync());
+    if (buttonId === 100 || buttonId === 300) {
+      
+      
+      
+      markHostButtonHandled();
+      setPendingButton(buttonId);
+      
+      setPendingButton(null);
+    }
+
+    if (buttonId === 100 || buttonId === 300) {
+      const toolbarMode = buttonId === 300 ? 'doc_notipal' : 'note_notipal';
+      console.log('[index]: toolbar entry=', toolbarMode, 'available=', FloatingToolbarBridge.isAvailable, 'showing=', FloatingToolbarBridge.isShowingSync());
       stopAllModes();
-      FloatingToolbarBridge.toggleFromPluginButton();
+      const invoked = FloatingToolbarBridge.toggleFromPluginButton(toolbarMode);
+      
+      setPendingButton(null);
+      console.log('[index]: native toolbar toggle invoked=', invoked, 'mode=', toolbarMode);
       refreshTitleClips();
       return;
     }
+
   },
 });
 
@@ -190,24 +226,27 @@ PluginManager.registerButton(1, ['NOTE'], {
   showType: 0,
 });
 
-registerLocalSendButton();
 
-// On startup, reconcile with native server: if the previous JS context's server
-// is still running (defensive; normally stopped in onCatalystInstanceDestroy),
-// adopt it to sync the _localSendStarted flag.
+
+
 LocalSendBridge.getServerStatus().then(st => {
-  if (st && st.running) {
-    console.log('[index]: adopting already-running LocalSend server');
-    startLocalSend();
+  if (FloatingToolbarBridge.isSessionActiveSync()) {
+    console.log('[index]: ensure LocalSend for active toolbar session');
+    startLocalSend(false);
+  } else if (st && st.running) {
+    console.log('[index]: leftover LocalSend with no toolbar session → stop');
+    stopLocalSend();
   }
 }).catch(() => {});
 
 PluginManager.registerButton(1, ['DOC'], {
   id: 300,
-  name: JSON.stringify({ en: 'Screenshot Crop', zh_CN: '截图裁切' }),
+  name: 'Inkling',
   icon: Image.resolveAssetSource(require('./assets/toolbar_icon.png')).uri,
   showType: 0,
 });
+
+registerDocSendButton();
 
 if (ENABLE_DEBUG) {
   PluginManager.registerConfigButton();

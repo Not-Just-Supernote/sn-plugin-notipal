@@ -7,24 +7,34 @@ import {
 } from 'react-native';
 import { PluginManager, PluginNoteAPI, PluginFileAPI, PluginCommAPI, NativeUIUtils, FileUtils } from 'sn-plugin-lib';
 
-import FloatingToolbarBridge from './components/FloatingToolbarBridge';
+import FloatingToolbarBridge, {
+  checkPendingButton,
+  peekPendingButton,
+  setAppMounted,
+  getLastHostButtonEventAt,
+  getLastHostButtonHandledAt,
+} from './components/FloatingToolbarBridge';
 import FloatingBubbleBridge, { PaletteBubbleBridge } from './components/BubbleBridges';
-import { loadClips } from './components/ToolPresets';
+import { loadClips, clipFilledFlags } from './components/ToolPresets';
 import {
   ensureInit, getActiveMode, flushPendingTexts, reviveIfNeeded,
-  stopMode, stopAiMode,
-  startLocalSend, stopLocalSend, isLocalSendRunning,
+  stopMode, stopAiMode, stopTextReceive,
 } from './components/BackgroundService';
 import { executeAction, attachModeListeners, detachModeListeners, getPaletteLassoInfo, snapshotCreate, snapshotRestore, snapshotDelete } from './components/ToolActions';
-import { modifyLiveElements, ensureMarkerDirection, isMarkerStroke, MARKER_PT } from './components/ElementOps';
+import { modifyLiveElements, modifyFileElements, ensureMarkerDirection, isMarkerStroke, MARKER_PT } from './components/ElementOps';
+import {
+  hostCall, rectFromHost, reselectLasso, prepareInsertedStickerSelection,
+  commitSelectionAndRead, pickReselectRect, beginLassoTxn, endLassoTxn, isLassoTxnBusy,
+} from './components/LassoTxn';
 import { FileLogger } from './components/FileLogger';
 import { LassoExtractor } from './components/LassoExtractor';
-import { checkPendingButton, peekPendingButton, setAppMounted, getLastHostButtonEventAt } from './pendingButton';
 import { t } from './components/i18n';
-import { appendPageWithLink } from './components/AppendPageService';
-import LocalSendBridge from './components/LocalSendBridge';
+import { TOOL_IDS } from './components/ToolIdentifiers';
+
 
 type AppScreen = 'nativeHelper';
+
+
 
 let _lassoExtractGen = 0;
 let _lassoExtractStartedAt = 0;
@@ -54,29 +64,6 @@ function App(): React.JSX.Element {
     FloatingToolbarBridge.openPanel('config');
   }, []);
 
-  const runLocalSendToggle = useCallback(async () => {
-    try {
-      if (isLocalSendRunning()) {
-        await stopLocalSend();
-        NativeUIUtils.showErrorTipDialog(t('localsend_stopped'));
-      } else {
-        const wifi = await LocalSendBridge.isWifiConnected();
-        if (!wifi) {
-          NativeUIUtils.showErrorTipDialog(t('no_wifi'));
-          return;
-        }
-        const ok = await startLocalSend();
-        if (ok) NativeUIUtils.showErrorTipDialog(t('localsend_started'));
-      }
-    } catch (e) {
-      console.error('[App]: LocalSend fallback toggle error:', e);
-    } finally {
-      setTimeout(() => {
-        try { PluginManager.closePluginView(); } catch (_) {}
-      }, 100);
-    }
-  }, []);
-
   useEffect(() => {
     console.log('[App]: ── mount ──');
     setAppMounted(true);
@@ -91,12 +78,14 @@ function App(): React.JSX.Element {
         setTimeout(() => PluginManager.closePluginView(), 200);
         return;
       }
+      
       const now = Date.now();
       if (now - _lassoExtractStartedAt < 800) {
         console.log('[LASSO-DBG/App] runLassoExtraction skipped (debounce)');
         return;
       }
       _lassoExtractStartedAt = now;
+      
       const gen = ++_lassoExtractGen;
       LassoExtractor.extract().then(extracted => {
         if (gen !== _lassoExtractGen) {
@@ -170,18 +159,26 @@ function App(): React.JSX.Element {
       }
     } else if (toolbarShowing) {
       const earlyPending = checkPendingButton();
-      if (earlyPending === 999) {
+      if (earlyPending === 999 || initialPending === 999) {
         openMainPanel();
       } else {
-        setTimeout(() => { try { PluginManager.closePluginView(); } catch (_) {} }, 0);
+        
+        
+        
+        console.log('[App]: toolbar already showing; native lifecycle owns host close');
       }
     } else {
+      
+      
       const earlyPending = checkPendingButton();
-      if (earlyPending === 100 || earlyPending === 200 || earlyPending === 300) {
-        // index.js closes the plugin view after the toggle flow finishes.
-      } else if (earlyPending === 999) {
+      if (earlyPending === 100 || earlyPending === 300) {
+        
+      } else if (earlyPending === 999 || initialPending === 999) {
         openMainPanel();
       } else {
+        
+        
+        
         console.log('[App]: source-less PluginView mount → inspect host entry');
         FloatingToolbarBridge.inspectAndFlushHostEntry().then((entry) => {
           if (entry === 'config') {
@@ -189,55 +186,72 @@ function App(): React.JSX.Element {
             openMainPanel();
             return;
           }
-          if (entry === 'localsend') {
-            const fallbackAt = Date.now();
-            setTimeout(() => {
-              if (getLastHostButtonEventAt() >= fallbackAt) return;
-              console.log('[App]: cached LocalSend event never reached JS → fallback toggle service');
-              runLocalSendToggle();
-            }, 1200);
-            return;
-          }
           if (entry === 'flushed') {
             const flushAt = Date.now();
             setTimeout(() => {
-              const replayed = checkPendingButton();
+              
+              
+              const replayed = peekPendingButton();
               if (replayed === 999) {
+                
+                checkPendingButton();
                 openMainPanel();
+                return;
+              }
+              
+              
+              
+              
+              if (replayed !== null || FloatingToolbarBridge.isShowingSync()) {
+                console.log('[App]: flushed entry already owned by button/native toolbar; skip fallback');
+                return;
+              }
+              if (getLastHostButtonHandledAt() >= flushAt) {
+                console.log('[App]: flushed entry handled by PluginManager listener; skip fallback');
                 return;
               }
               if (getLastHostButtonEventAt() >= flushAt) return;
               FloatingToolbarBridge.reportHostButtonChannel(false);
-              if (earlyPending === 200) {
-                console.log('[App]: LocalSend event never reached JS → fallback toggle service');
-                runLocalSendToggle();
-                return;
-              }
               console.log('[App]: flushed event never reached JS → fallback toggle toolbar');
+              
+              
               FloatingToolbarBridge.toggleFromPluginButton();
             }, 1200);
             return;
           }
-          if (earlyPending === 200) {
-            console.log('[App]: LocalSend host entry unavailable → fallback toggle service');
-            runLocalSendToggle();
-            return;
-          }
-          FloatingToolbarBridge.toggleFromPluginButton();
+          
+          
+          
+          
+          console.log('[App]: source-less mount has no recoverable host entry; wait for button listener');
         });
       }
     }
 
     loadClips().then((clipData) => {
-      const filled = ([1,2,3,4,5,6] as const).map(n => !!clipData[String(n) as keyof typeof clipData]);
+      const filled = clipFilledFlags(clipData);
       FloatingToolbarBridge.updateTitleClips(filled);
     });
 
     const toolTapSub = FloatingToolbarBridge.onToolTap(async ({ toolAction }) => {
       console.log('[BUBBLE-DBG/JS] onToolTap received action=', toolAction);
-      if (toolAction === 'invert_ink') {
+      if (toolAction === TOOL_IDS.INK_PALETTE) {
         try {
+          prefetchedPaletteContext = null;
+          if (prefetchedPaletteEls) {
+            for (const el of prefetchedPaletteEls) { try { el?.recycle?.(); } catch (_) {} }
+          }
+          prefetchedPaletteEls = null;
+          if (!await prepareInsertedStickerSelection()) return;
           console.log('[PLT/tap] checking lasso type counts…');
+          const contextPromise = capturePaletteApplyContext('tap').catch((e) => {
+            console.warn('[PLT/tap] context capture failed:', e);
+            return null;
+          });
+          const infoPromise = getPaletteLassoInfo(true).catch((e) => {
+            console.warn('[PLT/tap] lasso read failed:', e);
+            return null;
+          });
           const cntRes = await (PluginCommAPI as any).getLassoElementTypeCounts?.();
           const c = cntRes?.result;
           console.log('[PLT/tap] typeCounts:', JSON.stringify(c));
@@ -248,15 +262,24 @@ function App(): React.JSX.Element {
             (c?.bitmapNum ?? 0);
           if (nonInk > 0) {
             console.warn(`[PLT/tap] rejected: nonInk=${nonInk}`);
+            const rejectedInfo = await infoPromise;
+            for (const el of rejectedInfo?.elements ?? []) { try { el?.recycle?.(); } catch (_) {} }
             NativeUIUtils.showErrorTipDialog(t('palette_ink_only'));
             return;
           }
-          const info = await getPaletteLassoInfo(true);
+          const info = await infoPromise;
           console.log(`[PLT/tap] info ready, nums=${info?.elementNums?.length ?? 0}`);
+          if (info?.elementNums?.length) {
+            await snapshotCreate(true, false);
+          }
           if (prefetchedPaletteEls) {
             for (const el of prefetchedPaletteEls) { try { el?.recycle?.(); } catch (_) {} }
           }
           prefetchedPaletteEls = info?.elements ?? null;
+          prefetchedPaletteContext = await contextPromise;
+          if (!prefetchedPaletteContext) {
+            console.warn('[PLT/tap] no context snapshot; Apply will read the host live instead');
+          }
           FloatingToolbarBridge.showPalettePanel(JSON.stringify(info ?? {}));
         } catch (e) {
           console.error('[PLT/tap] CRASH:', e);
@@ -266,7 +289,7 @@ function App(): React.JSX.Element {
       const result = await executeAction(toolAction);
       console.log('[App]: tool result:', result);
 
-      if (toolAction === 'voice_transcribe' && result === 'AI receive: ON') {
+      if (toolAction === TOOL_IDS.AI_RELAY && result === 'AI receive: ON') {
         if (hasPermissionRef.current) {
           FloatingToolbarBridge.showCurrent();
         }
@@ -276,20 +299,21 @@ function App(): React.JSX.Element {
       if (typeof result === 'string' &&
           (result.startsWith('Saved to clip') || (result.startsWith('Clip') && result.endsWith('cleared')))) {
         const newClips = await loadClips();
-        const filled = ([1,2,3,4,5,6] as const).map(n => !!newClips[String(n) as keyof typeof newClips]);
+        const filled = clipFilledFlags(newClips);
         FloatingToolbarBridge.updateTitleClips(filled);
       }
     });
 
-    const toolModeExitSub = FloatingToolbarBridge.onToolModeExit(async ({ toolAction }) => {
+    const toolModeExitSub = FloatingToolbarBridge.onToolModeExit(({ toolAction }) => {
       console.log('[App]: onToolModeExit:', toolAction);
-      if (toolAction === 'voice_transcribe') return;
-      await executeAction(toolAction);
+      
+      if (toolAction === TOOL_IDS.AI_RELAY) return;
+      stopTextReceive();
     });
 
     const clipsChangedSub = DeviceEventEmitter.addListener('clipsChanged', async () => {
       const newClips = await loadClips();
-      const filled = ([1,2,3,4,5,6] as const).map(n => !!newClips[String(n) as keyof typeof newClips]);
+      const filled = clipFilledFlags(newClips);
       FloatingToolbarBridge.updateTitleClips(filled);
     });
 
@@ -299,9 +323,9 @@ function App(): React.JSX.Element {
         const result = await executeAction(`clip_clear_${slot}`);
         console.log('[App]: long press clear:', result);
         const newClips = await loadClips();
-        const filled = ([1,2,3,4,5,6] as const).map(n => !!newClips[String(n) as keyof typeof newClips]);
+        const filled = clipFilledFlags(newClips);
         FloatingToolbarBridge.updateTitleClips(filled);
-      } else if (toolId === 'invert_ink') {
+      } else if (toolId === TOOL_IDS.INK_PALETTE) {
         PaletteBubbleBridge.show();
       }
     });
@@ -357,9 +381,6 @@ function App(): React.JSX.Element {
         if (!mode) {
 
           FloatingBubbleBridge.hide();
-          if (hasPermissionRef.current && FloatingToolbarBridge.isShowingSync()) {
-            FloatingToolbarBridge.showCurrent();
-          }
         }
       },
     );
@@ -389,79 +410,75 @@ function App(): React.JSX.Element {
       openConfigForButton(id);
     });
 
-    let lastInsertTime = 0;
-    const INSERT_DEDUP_MS = 1000;
+    const handledInsertRequests = new Set<string>();
     const nativeInsertSub = DeviceEventEmitter.addListener('nativeInsertImage', async (evt: {
       path: string;
-      fromQueue?: boolean;
+      requestId: string;
       fromInsertNext?: boolean;
-      cacheBaseName?: string;
-      replaceNotePath?: string;
-      replacePageNum?: number;
-      replaceNumInPage?: number;
     }) => {
-      const { path, fromQueue, fromInsertNext, cacheBaseName, replaceNotePath, replacePageNum, replaceNumInPage } = evt;
-      const now = Date.now();
-      const elapsed = now - lastInsertTime;
-      console.log('[INSERT-DBG/App] nativeInsertImage event, path=', path, 'elapsed=', elapsed, 'fromInsertNext=', fromInsertNext);
-      if (!fromQueue && elapsed < INSERT_DEDUP_MS) {
-        console.log('[INSERT-DBG/App] skipped (dedup, elapsed=' + elapsed + 'ms)');
-        return;
+      const { path, requestId, fromInsertNext } = evt;
+      if (handledInsertRequests.has(requestId)) return;
+      handledInsertRequests.add(requestId);
+      if (handledInsertRequests.size > 64) {
+        handledInsertRequests.delete(handledInsertRequests.values().next().value!);
       }
-      lastInsertTime = now;
-
-      if (PluginNoteAPI) {
-        console.log('[INSERT-DBG/App] calling PluginNoteAPI.insertImage');
-        try {
-          try { await (PluginCommAPI as any).setLassoBoxState?.(2); } catch (_le) {}
-          const result = PluginNoteAPI.insertImage(path);
-          console.log('[INSERT-DBG/App] insertImage returned:', result);
-          if (result && typeof result.then === 'function') {
-            result.then(async (r: any) => {
-              console.log('[INSERT-DBG/App] insertImage promise resolved:', r);
-              if (r && r.success && fromInsertNext) {
-                console.log('[INSERT-DBG/App] insertNext succeeded → deleting file');
-                FloatingToolbarBridge.deleteQueueFile(path).then(d =>
-                  console.log('[INSERT-DBG/App] queue file delete result:', d)
-                );
-              } else if (!r || !r.success) {
-                console.warn('[INSERT-DBG/App] insert FAILED, keeping file:', r?.error);
-              }
-              if (r && r.success) {
-                const toDelete = FloatingToolbarBridge.drainReceivedDeletes();
-                for (const p of toDelete) {
-                  FileUtils.deleteFile(p).catch(() => {});
-                }
-              }
-            }).catch((e: unknown) => console.error('[INSERT-DBG/App] insertImage promise rejected:', e));
-          }
-        } catch (e) {
-          console.error('[INSERT-DBG/App] insertImage threw:', e);
+      let success = false;
+      try {
+        console.log('[INSERT-DBG/App] insert request=', requestId, 'path=', path);
+        if (FloatingToolbarBridge.isMosaicBoardVisible()) {
+          const source = fromInsertNext ? 'inkling-doc-screenshot' : 'inkling-insert-image';
+          success = await FloatingToolbarBridge.enqueueMosaicImage(path, source);
+        } else {
+          const prepared = await FloatingToolbarBridge.prepareImageForInsertion(path);
+          try { await (PluginCommAPI as any).setLassoBoxState?.(2); } catch (_) {}
+          const result: any = await PluginNoteAPI.insertImage(prepared);
+          success = result?.success === true;
+          console.log('[INSERT-DBG/App] insertImage resolved:', result, 'prepared=', prepared);
         }
-      } else {
-        console.warn('[INSERT-DBG/App] PluginNoteAPI unavailable');
+        if (success) {
+          if (fromInsertNext) await FloatingToolbarBridge.deleteQueueFile(path);
+          if (FloatingToolbarBridge.consumeReceivedImageDelete(path)) {
+            await FileUtils.deleteFile(path).catch(() => {});
+          }
+        }
+      } catch (error) {
+        console.error('[INSERT-DBG/App] image insertion failed:', error);
+      } finally {
+        FloatingToolbarBridge.imageInsertFinished(requestId, path, success);
       }
     });
 
     const nativeDocLinkSub = DeviceEventEmitter.addListener('nativeInsertDocLink', async (evt: {
       path: string;
       linkName: string;
+      requestId: string;
+      targetFile: string;
+      targetPage: number;
     }) => {
       const { path, linkName: rawLinkName } = evt;
 
       const dotIdx = rawLinkName.lastIndexOf('.');
       const linkName = dotIdx > 0 ? rawLinkName.substring(0, dotIdx) : rawLinkName;
       console.log('[App] nativeInsertDocLink: path=', path, 'linkName=', linkName);
+      let selectionReady = false;
+      let targetFile = '';
+      let targetPage = -1;
       if (PluginNoteAPI) {
         try {
           const fpRes = await PluginCommAPI.getCurrentFilePath();
           const pgRes = await PluginCommAPI.getCurrentPageNum();
-          let pageW = 1404, pageH = 1872;
+          let pageW = 0, pageH = 0;
           let notePath = '';
-          let pageNum = 0;
+          let pageNum: number | null = null;
           if (fpRes?.success && fpRes.result) notePath = fpRes.result;
-          if (pgRes?.success && pgRes.result !== undefined) pageNum = pgRes.result;
-          if (notePath && pageNum !== undefined) {
+          if (pgRes?.success && Number.isInteger(pgRes.result)) pageNum = pgRes.result;
+          if (evt.targetFile && (notePath !== evt.targetFile || pageNum !== evt.targetPage)) {
+            console.log('[App] document link queue ended: target page changed');
+            return;
+          }
+          targetFile = notePath;
+          targetPage = pageNum ?? -1;
+          if (notePath && pageNum !== null) {
             const layersRes: any = await PluginFileAPI.getLayers(notePath, pageNum);
             const currentLayer = Array.isArray(layersRes?.result)
               ? layersRes.result.find((layer: any) => layer.isCurrentLayer)
@@ -474,12 +491,18 @@ function App(): React.JSX.Element {
             }
 
             const psRes: any = await PluginFileAPI.getPageSize(notePath, pageNum);
-            if (psRes?.success && psRes.result) {
+            if (psRes?.success && psRes.result?.width > 0 && psRes.result?.height > 0) {
               pageW = psRes.result.width;
               pageH = psRes.result.height;
             }
           }
 
+          if (!(notePath && pageNum !== null && pageW > 0 && pageH > 0)) {
+            console.warn('[App] nativeInsertDocLink skipped: actual page size unavailable');
+            return;
+          }
+
+          
           try { await (PluginCommAPI as any).setLassoBoxState?.(2); } catch (_le) {}
 
           const linkW = Math.min(linkName.length * 30 + 40, pageW * 0.6);
@@ -488,6 +511,7 @@ function App(): React.JSX.Element {
           const fontSize = 49;
           const lineH = fontSize + 10;
 
+          
           try {
             if (notePath) {
               const elRes: any = await PluginFileAPI.getElements(pageNum, notePath);
@@ -496,12 +520,14 @@ function App(): React.JSX.Element {
                 for (const el of elRes.result) {
                   try {
                     const elType = el.type;
+                    
                     if (typeof elType === 'number' && elType >= 500 && elType <= 502) {
                       const rect = el.textBox?.textRect;
                       if (rect && typeof rect.top === 'number' && typeof rect.bottom === 'number') {
                         occupied.push({ top: rect.top, bottom: rect.bottom });
                       }
                     }
+                    
                     if (typeof elType === 'number' && elType === 600) {
                       const lk = el.link;
                       if (lk && typeof lk.Y === 'number' && typeof lk.height === 'number') {
@@ -567,8 +593,8 @@ function App(): React.JSX.Element {
 
           try {
             await PluginCommAPI.reloadFile();
-            await new Promise(resolve => setTimeout(resolve, 300));
-
+            
+            
             const pad = 5;
             const lassoRect = {
               left: textLink.rect.left - pad,
@@ -582,8 +608,9 @@ function App(): React.JSX.Element {
             const lr: any = await PluginCommAPI.lassoElements(lassoRect);
             console.log('[App] lassoElements result:', JSON.stringify(lr));
             if (lr?.success && lr.result !== false) {
-              console.log('[App] lassoElements succeeded, calling setLassoBoxState(0)');
-              await (PluginCommAPI as any).setLassoBoxState?.(0);
+              const shown: any = await (PluginCommAPI as any).setLassoBoxState?.(0);
+              selectionReady = shown?.success === true && shown.result !== false;
+              console.log('[App] lassoElements succeeded, setLassoBoxState(0) result:', JSON.stringify(shown));
             } else {
               console.warn('[App] lassoElements did not select: success=', lr?.success, 'result=', lr?.result);
             }
@@ -592,31 +619,51 @@ function App(): React.JSX.Element {
           }
         } catch (e) {
           console.error('[App] insertTextLink error:', e);
+        } finally {
+          FloatingToolbarBridge.docLinkInsertFinished(evt.requestId, selectionReady, targetFile, targetPage);
         }
+      } else {
+        FloatingToolbarBridge.docLinkInsertFinished(evt.requestId, false, '', -1);
       }
     });
 
-    let paletteInFlight = false;
+    
+    
+    let paletteApplyOwnsPanel = false;
     let prefetchedPaletteEls: any[] | null = null;
+    type PaletteApplyContext = {
+      filePath: string;
+      pageNum: number;
+      lassoRect: { left: number; top: number; right: number; bottom: number } | null;
+    };
+    
+    
+    let prefetchedPaletteContext: PaletteApplyContext | null = null;
 
-    // getElements after a reloadFile can race the host's async page reload
-    // (LoadPageAsyncTask) and return an EMPTY page. Retry a few times until it's back.
-    // Returns { ok, els } — caller owns recycling els.
-    async function getElementsStable(pageNum: number, filePath: string, tag: string): Promise<{ ok: boolean; els: any[] }> {
-      for (let attempt = 0; attempt < 5; attempt++) {
-        const res: any = await PluginFileAPI.getElements(pageNum, filePath);
-        if (!res?.success || !Array.isArray(res.result)) {
-          console.warn(`[PLT/${tag}] getElements FAIL ok=${res?.success}`);
-          return { ok: false, els: [] };
-        }
-        if (res.result.length > 0) return { ok: true, els: res.result };
-        console.log(`[PLT/${tag}] getElements empty (attempt ${attempt + 1}) — page still reloading, retrying…`);
-        for (const el of res.result) { try { el?.recycle?.(); } catch (_) {} }
-        await new Promise(r => setTimeout(r, 150));
+
+    async function capturePaletteApplyContext(tag: string): Promise<PaletteApplyContext | null> {
+      const [fpRes, pgRes, rectRes] = await Promise.all([
+        hostCall(PluginCommAPI.getCurrentFilePath() as Promise<any>, `${tag}/file`),
+        hostCall(PluginCommAPI.getCurrentPageNum() as Promise<any>, `${tag}/page`),
+        hostCall(PluginCommAPI.getLassoRect() as Promise<any>, `${tag}/rect`),
+      ]);
+      if (!fpRes?.success || typeof fpRes.result !== 'string' || fpRes.result.length === 0 ||
+          !pgRes?.success || !Number.isInteger(pgRes.result) || pgRes.result < 0) {
+        console.warn(`[PLT/${tag}] context capture incomplete: file=${fpRes?.success} page=${pgRes?.success}`);
+        return null;
       }
-      console.warn(`[PLT/${tag}] getElements still empty after retries`);
-      return { ok: true, els: [] };
+      const lassoRect = rectRes?.success ? rectFromHost(rectRes.result) : null;
+      if (!lassoRect) {
+        console.warn(`[PLT/${tag}] context capture has no usable lasso rect`);
+        return null;
+      }
+      console.log(`[PLT/${tag}] context captured page=${pgRes.result} rect=${JSON.stringify(lassoRect)}`);
+      return { filePath: fpRes.result, pageNum: pgRes.result, lassoRect };
     }
+
+
+
+
 
     function applyPaletteFields(
       targets: any[],
@@ -639,6 +686,15 @@ function App(): React.JSX.Element {
       }
     }
 
+
+
+
+
+
+
+
+
+
     async function doPalette(
       elementNums: number[],
       penColor: number | null,
@@ -647,17 +703,17 @@ function App(): React.JSX.Element {
       tag: string,
       prefetchedEls?: any[],
       hasMarker?: boolean,
+      capturedContext?: PaletteApplyContext,
     ): Promise<void> {
       if (elementNums.length === 0) { console.log(`[PLT/${tag}] skip: empty elementNums`); return; }
       const wantColorOrThickness = penColor !== null || thickness !== null;
       const wantPenType = penType !== null;
       if (!wantColorOrThickness && !wantPenType) { console.log(`[PLT/${tag}] skip: nothing to change`); return; }
 
-      if (paletteInFlight) {
+      if (!beginLassoTxn()) {
         console.warn(`[PLT/${tag}] BLOCKED: another doPalette is running`);
         return;
       }
-      paletteInFlight = true;
       let ownedEls: any[] | null = null;
       let prefetchRecycled = false;
       const t0 = Date.now();
@@ -667,51 +723,52 @@ function App(): React.JSX.Element {
       console.log(`[PLT/${tag}] START nums=${elementNums.length} color=${penColor} thick=${thickness} pt=${penType} prefetch=${!!prefetchedEls} marker=${hasMarkerSelection}`);
 
       try {
-        const fpRes: any = await PluginCommAPI.getCurrentFilePath();
-        const pgRes: any = await PluginCommAPI.getCurrentPageNum();
-        if (!fpRes?.success || !pgRes?.success) {
-          console.warn(`[PLT/${tag}] ABORT: filePath.ok=${fpRes?.success} pageNum.ok=${pgRes?.success}`);
-          return;
-        }
-        const filePath = fpRes.result;
-        const pageNum = pgRes.result;
-
-        let targets: any[] = [];
-        if (hasMarkerSelection) {
-          // Marker fill data is only complete after the host flushes unsaved strokes.
-          if (prefetchedEls) {
-            for (const el of prefetchedEls) { try { el?.recycle?.(); } catch (_) {} }
-            prefetchRecycled = true;
-          }
-          await PluginNoteAPI.saveCurrentNote();
-          console.log(`[PLT/${tag}] saveCurrentNote +${Date.now() - t0}ms`);
-          try { (PluginCommAPI as any).clearElementCache?.(); } catch (_) {}
-          const fetched = await getElementsStable(pageNum, filePath, tag);
-          if (!fetched.ok) return;
-          ownedEls = fetched.els;
-          const numSet = new Set(elementNums);
-          targets = fetched.els.filter(
-            (el: any) => el?.numInPage != null && numSet.has(el.numInPage) && (el.type === 0 || el.type === 700)
-          );
-        } else if (prefetchedEls) {
-          targets = prefetchedEls.filter(
-            (el: any) => el?.numInPage != null && (el.type === 0 || el.type === 700)
-          );
+        let filePath: string;
+        let pageNum: number;
+        if (capturedContext) {
+          filePath = capturedContext.filePath;
+          pageNum = capturedContext.pageNum;
+          console.log(`[PLT/${tag}] using prefetched context page=${pageNum}`);
         } else {
-          const fetched = await getElementsStable(pageNum, filePath, tag);
-          if (!fetched.ok) return;
-          ownedEls = fetched.els;
-          const numSet = new Set(elementNums);
-          targets = fetched.els.filter(
-            (el: any) => el?.numInPage != null && numSet.has(el.numInPage) && (el.type === 0 || el.type === 700)
+          const fpRes: any = await hostCall(
+            PluginCommAPI.getCurrentFilePath() as Promise<any>,
+            `${tag}/file-fallback`,
           );
+          const pgRes: any = await hostCall(
+            PluginCommAPI.getCurrentPageNum() as Promise<any>,
+            `${tag}/page-fallback`,
+          );
+          if (!fpRes?.success || !pgRes?.success) {
+            console.warn(`[PLT/${tag}] ABORT: filePath.ok=${fpRes?.success} pageNum.ok=${pgRes?.success}`);
+            return;
+          }
+          filePath = fpRes.result;
+          pageNum = pgRes.result;
         }
+        const isNoteFile = /\.note$/i.test(filePath);
+
+        const sel = await commitSelectionAndRead({
+          tag, pageNum, filePath, elementNums,
+          prefetchedEls, fallbackRect: capturedContext?.lassoRect ?? null, t0,
+        });
+        prefetchRecycled = true;
+        if (!sel) return;
+        ownedEls = sel.pageEls;
+        const { targets, lassoRectBefore } = sel;
 
         if (targets.length === 0) {
-          console.log(`[PLT/${tag}] no targets`);
+          
+          
+          const reselected = lassoRectBefore
+            ? await reselectLasso(lassoRectBefore, `${tag}/no-targets`)
+            : false;
+          try { FloatingToolbarBridge.parkToolbarForLasso(reselected); } catch (_) {}
           return;
         }
         console.log(`[PLT/${tag}] targets=${targets.length} page=${pageNum} +${Date.now() - t0}ms`);
+
+        
+        const reselectRect = await pickReselectRect(sel, tag);
 
         applyPaletteFields(targets, penColor, thickness, penType);
         if (convertingToMarker) {
@@ -720,7 +777,11 @@ function App(): React.JSX.Element {
           }
         }
 
-        const modRes: any = await modifyLiveElements(targets, pageNum);
+        
+        
+        const modRes: any = isNoteFile
+          ? await modifyLiveElements(targets, pageNum)
+          : await modifyFileElements(filePath, pageNum, targets);
         const modCount = Array.isArray(modRes?.result) ? modRes.result.length : -1;
         console.log(`[PLT/${tag}] live ok=${modRes?.success} modified=${modCount}/${targets.length} err=${modRes?.error?.message ?? ''} +${Date.now() - t0}ms`);
         if (!modRes?.success) {
@@ -729,6 +790,28 @@ function App(): React.JSX.Element {
           const got = new Set(Array.isArray(modRes.result) ? modRes.result : []);
           const skipped = targets.filter((el: any) => !got.has(el.numInPage)).map((el: any) => el.numInPage);
           console.warn(`[PLT/${tag}] host SKIPPED ${skipped.length} strokes: nums=${JSON.stringify(skipped)}`);
+        }
+
+        if (modRes?.success && !isNoteFile) {
+          
+          const rel: any = await PluginCommAPI.reloadFile();
+          console.log(`[PLT/${tag}] reloadFile ok=${rel?.success} +${Date.now() - t0}ms`);
+        }
+
+        
+        
+        
+        
+        
+        
+        
+        
+        if (modRes?.success) {
+          const reselected = isNoteFile && reselectRect
+            ? await reselectLasso(reselectRect, tag)
+            : false;
+          if (!isNoteFile) console.log(`[PLT/${tag}] doc: skip reselect after reloadFile`);
+          try { FloatingToolbarBridge.parkToolbarForLasso(reselected); } catch (_) {}
         }
         console.log(`[PLT/${tag}] DONE ${Date.now() - t0}ms`);
       } catch (e) {
@@ -740,12 +823,13 @@ function App(): React.JSX.Element {
         } else if (prefetchedEls && !prefetchRecycled) {
           for (const el of prefetchedEls) { try { el?.recycle?.(); } catch (_) {} }
         }
-        paletteInFlight = false;
+        endLassoTxn();
       }
     }
 
     const paletteApplySub = DeviceEventEmitter.addListener('paletteApply', async (evt: any) => {
       console.log('[PLT/apply] event:', JSON.stringify(evt));
+      let ownsPaletteApply = false;
       try {
         const penColor = evt.penColor != null ? evt.penColor : null;
         const thickness = evt.thickness != null ? evt.thickness : null;
@@ -760,19 +844,50 @@ function App(): React.JSX.Element {
         const hasMarker = evt.hasMarkerStroke === true;
         const prefetched = prefetchedPaletteEls;
         prefetchedPaletteEls = null;
+        const capturedContext = prefetchedPaletteContext;
+        prefetchedPaletteContext = null;
         console.log(`[PLT/apply] nums=${elementNums.length} c=${penColor} t=${thickness} pt=${penType} marker=${hasMarker} prefetch=${!!prefetched}`);
-        await doPalette(elementNums, penColor, thickness, penType, 'apply', prefetched ?? undefined, hasMarker);
+        
+        
+        
+        
+        if (isLassoTxnBusy()) {
+          console.warn('[PLT/apply] BLOCKED: another palette transaction is running');
+          for (const el of prefetched ?? []) { try { el?.recycle?.(); } catch (_) {} }
+          
+          
+          
+          
+          if (!paletteApplyOwnsPanel) FloatingToolbarBridge.finishPaletteApply();
+          return;
+        }
+        ownsPaletteApply = true;
+        paletteApplyOwnsPanel = true;
+        
+        if (!capturedContext) console.warn('[PLT/apply] no context snapshot, reading host live');
+        await doPalette(elementNums, penColor, thickness, penType, 'apply', prefetched ?? undefined, hasMarker, capturedContext ?? undefined);
       } catch (e) {
         console.error('[PLT/apply] CRASH:', e);
+      } finally {
+        
+        
+        
+        if (ownsPaletteApply) {
+          paletteApplyOwnsPanel = false;
+          FloatingToolbarBridge.finishPaletteApply();
+          FloatingToolbarBridge.paletteApplyFinished();
+        }
       }
     });
 
+    
     const paletteSnapshotSub = DeviceEventEmitter.addListener('paletteSnapshot', async (evt: any) => {
       console.log('[SNAP] event:', JSON.stringify(evt));
       try {
         if (evt?.op === 'create') {
           console.log('[SNAP] create:', await snapshotCreate());
         } else if (evt?.op === 'restore' && evt.sticker) {
+          await snapshotCreate(true);
           console.log('[SNAP] restore:', await snapshotRestore(evt.sticker));
         } else if (evt?.op === 'delete' && evt.id) {
           console.log('[SNAP] delete:', await snapshotDelete(evt.id));
@@ -780,16 +895,30 @@ function App(): React.JSX.Element {
       } catch (e) {
         console.error('[SNAP] error:', e);
       } finally {
+        
         FloatingToolbarBridge.paletteSnapshotsChanged();
       }
     });
 
     const COLOR_MAP: Record<string, number> = { black: 0x00, darkGray: 0x9D, lightGray: 0xC9, ghost: 0xFE };
     let cachedPaletteNums: number[] = [];
+    let paletteBubbleInFlight = false;
 
     const paletteBubbleSlotSub = PaletteBubbleBridge.onSlotTap(async ({ color, thickness, penType }) => {
+      if (paletteBubbleInFlight) return;
+      paletteBubbleInFlight = true;
+      let bubblePaletteGuard = false;
       console.log(`[PLT/bubble] slotTap color=${color} thick=${thickness} pt=${penType}`);
       try {
+        if (!await prepareInsertedStickerSelection()) return;
+        const contextPromise = capturePaletteApplyContext('bubble').catch((e) => {
+          console.warn('[PLT/bubble] context capture failed:', e);
+          return null;
+        });
+        const infoPromise = getPaletteLassoInfo(true).catch((e) => {
+          console.warn('[PLT/bubble] lasso read failed:', e);
+          return null;
+        });
         const cntRes = await (PluginCommAPI as any).getLassoElementTypeCounts?.();
         const c = cntRes?.result;
         console.log('[PLT/bubble] typeCounts:', JSON.stringify(c));
@@ -800,36 +929,61 @@ function App(): React.JSX.Element {
           (c?.bitmapNum ?? 0);
         if (nonInk > 0) {
           console.warn(`[PLT/bubble] rejected: nonInk=${nonInk}`);
+          const rejectedInfo = await infoPromise;
+          for (const el of rejectedInfo?.elements ?? []) { try { el?.recycle?.(); } catch (_) {} }
           NativeUIUtils.showErrorTipDialog(t('palette_ink_only'));
           return;
         }
-        const info = await getPaletteLassoInfo(true);
-        if (!info?.elementNums && ((c?.trailNum ?? 0) + (c?.geometryNum ?? 0) + (c?.straightLineNum ?? 0) + (c?.curveLineNum ?? 0) + (c?.circleNum ?? 0) + (c?.ellipseNum ?? 0) + (c?.polygonNum ?? 0)) > 0) {
+        const inkCount = (c?.trailNum ?? 0) + (c?.geometryNum ?? 0) +
+          (c?.straightLineNum ?? 0) + (c?.curveLineNum ?? 0) + (c?.circleNum ?? 0) +
+          (c?.ellipseNum ?? 0) + (c?.polygonNum ?? 0);
+        const info = await infoPromise;
+        if (!info?.elementNums && inkCount > 0) {
           console.warn('[PLT/bubble] ABORT: lasso has ink counts but getLassoElements returned no elements');
           return;
         }
         const fromCache = !info?.elementNums;
         const elementNums: number[] = info?.elementNums ?? cachedPaletteNums;
-        if (elementNums.length === 0) { console.log('[PLT/bubble] no selection (info=null, cache empty)'); return; }
+        if (elementNums.length === 0) {
+          console.log('[PLT/bubble] no selection (info=null, cache empty)');
+          NativeUIUtils.showErrorTipDialog(t('palette_need_lasso'));
+          return;
+        }
         console.log(`[PLT/bubble] nums=${elementNums.length} fromCache=${fromCache} prevCache=${cachedPaletteNums.length}`);
         cachedPaletteNums = elementNums;
         const penColor = COLOR_MAP[color] ?? null;
-        await doPalette(elementNums, penColor, thickness, penType, 'bubble', info?.elements, info?.hasMarkerStroke === true);
+        if (inkCount > 0 || cachedPaletteNums.length > 0) {
+          await snapshotCreate(true, false);
+        }
+        const capturedContext = await contextPromise;
+        if (!capturedContext) console.warn('[PLT/bubble] no context snapshot, reading host live');
+        if (isLassoTxnBusy()) {
+          console.warn('[PLT/bubble] BLOCKED: another palette transaction is running');
+          for (const el of info?.elements ?? []) { try { el?.recycle?.(); } catch (_) {} }
+          return;
+        }
+        
+        
+        
+        
+        FloatingToolbarBridge.beginPaletteApply();
+        bubblePaletteGuard = true;
+        await doPalette(
+          elementNums,
+          penColor,
+          thickness,
+          penType,
+          'bubble',
+          info?.elements,
+          info?.hasMarkerStroke === true,
+          capturedContext ?? undefined,
+        );
       } catch (e) {
         console.error('[PLT/bubble] CRASH:', e);
+      } finally {
+        if (bubblePaletteGuard) FloatingToolbarBridge.paletteApplyFinished();
+        paletteBubbleInFlight = false;
       }
-    });
-
-    const appendPageSub = DeviceEventEmitter.addListener('onAppendPageAction', (evt: any) => {
-      if (!evt?.imagePath) return;
-      const crop = evt.cropX >= 0 ? {
-        offsetX: evt.cropX, offsetY: evt.cropY,
-        width: evt.cropW, height: evt.cropH,
-        imageWidth: evt.imgW, imageHeight: evt.imgH,
-      } : undefined;
-      (async () => {
-        try { await appendPageWithLink(evt.imagePath, crop); } catch (e) { console.warn('[App]: appendPage error:', e); }
-      })();
     });
 
     const titleClipSub = FloatingToolbarBridge.onTitleClipTap(async ({ slot }) => {
@@ -837,7 +991,7 @@ function App(): React.JSX.Element {
       if (typeof result === 'string' &&
           (result.startsWith('Saved to clip') || (result.startsWith('Clip') && result.endsWith('cleared')))) {
         const newClips = await loadClips();
-        const filled = ([1,2,3,4,5,6] as const).map(n => !!newClips[String(n) as keyof typeof newClips]);
+        const filled = clipFilledFlags(newClips);
         FloatingToolbarBridge.updateTitleClips(filled);
       }
     });
@@ -846,14 +1000,10 @@ function App(): React.JSX.Element {
       ? (FloatingToolbarBridge as any).onTitleClipLongPress(async ({ slot }: { slot: string }) => {
           await executeAction(`clip_clear_${slot}`);
           const newClips = await loadClips();
-          const filled = ([1,2,3,4,5,6] as const).map(n => !!newClips[String(n) as keyof typeof newClips]);
+          const filled = clipFilledFlags(newClips);
           FloatingToolbarBridge.updateTitleClips(filled);
         })
       : { remove() {} };
-
-    const titleLayerSub = FloatingToolbarBridge.onTitleLayerAction(async ({ direction }) => {
-      await executeAction(direction === 'prev' ? 'layer_prev' : 'layer_next');
-    });
 
     const nativePanelCloseSub = FloatingToolbarBridge.onNativePanelClose(async ({ panel }) => {
       if (panel === 'send') nativeSendActiveRef.current = false;
@@ -874,14 +1024,13 @@ function App(): React.JSX.Element {
       paletteApplySub.remove();
       paletteSnapshotSub.remove();
       paletteBubbleSlotSub.remove();
-      appendPageSub.remove();
       nativePanelCloseSub.remove();
       titleClipSub.remove();
       titleClipLongSub.remove();
-      titleLayerSub.remove();
       detachModeListeners();
     };
   }, []);
+
 
   console.log('[App] render: screen=', screen);
   return (
@@ -898,6 +1047,7 @@ function App(): React.JSX.Element {
     </View>
   );
 }
+
 
 const st = StyleSheet.create({
   container:     { flex: 1, backgroundColor: 'transparent' },

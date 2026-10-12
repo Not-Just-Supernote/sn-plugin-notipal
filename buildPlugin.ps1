@@ -1,20 +1,20 @@
-# PowerShell Script: Analyze Android Dependencies and Generate PluginConfig.json
 
 param(
-    # Keep JS/TS logs (debug build); default strips logs (release build).
     [switch]$WithLogs
 )
 
-# Tolerate unix-style flag: `./buildPlugin.ps1 --with-logs` (unbound args land in $args)
 if ($args -contains '--with-logs') { $WithLogs = $true }
 
-# Set color output function
+function Test-WithLogsEnabled {
+    return [bool]$script:WithLogs -or $env:WITH_LOGS -eq '1'
+}
+
 function Write-ColorOutput {
     param(
         [string]$Message,
         [string]$Color = 'White'
     )
-    
+
     switch ($Color) {
         'Red' { Write-Host $Message -ForegroundColor Red }
         'Green' { Write-Host $Message -ForegroundColor Green }
@@ -24,17 +24,11 @@ function Write-ColorOutput {
     }
 }
 
-# Detect operating system type
 function Test-OperatingSystem {
     Write-ColorOutput 'Running on Windows' 'Blue'
 }
 
-<#
-Function: Self-CheckScriptIntegrity
-Purpose: Detect problematic quotes/encoding and parse errors in this script
-Input: ScriptPath - full path of the script
-Output: [bool] true if self-check passes; false otherwise
-#>
+
 function Self-CheckScriptIntegrity {
     param([string]$ScriptPath)
 
@@ -81,12 +75,7 @@ function Self-CheckScriptIntegrity {
     return $true
 }
 
-<#
-Function: Test-HasAndroidNativeCode
-Purpose: Detect Android native sources (.java/.kt) or compiled classes in the project and node_modules
-Input: ProjectRoot - project root path
-Output: [bool] whether native code/classes exist
-#>
+
 function Test-HasAndroidNativeCode {
     param([string]$ProjectRoot)
 
@@ -142,35 +131,33 @@ function Test-HasAndroidNativeCode {
     return $hasNative
 }
 
-# Generate 16-character random string (numbers and lowercase letters)
 function New-RandomString {
     param([int]$Length = 16)
-    
+
     $chars = 'abcdefghijklmnopqrstuvwxyz0123456789'
     $randomString = ''
-    
+
     for ($i = 0; $i -lt $Length; $i++) {
         $randomIndex = Get-Random -Maximum $chars.Length
         $randomString += $chars[$randomIndex]
     }
-    
+
     return $randomString
 }
 
-# Get project information from package.json
 function Get-PackageInfo {
     param([string]$ProjectRoot)
-    
+
     $packageJsonPath = Join-Path $ProjectRoot 'package.json'
-    
+
     if (Test-Path $packageJsonPath) {
         try {
             $packageJson = Get-Content $packageJsonPath -Raw | ConvertFrom-Json
-            
+
             $name = $packageJson.name
             $description = if ($packageJson.description) { $packageJson.description } else { '' }
             $version = if ($packageJson.version) { $packageJson.version } else { '0.0.1' }
-            
+
             return @{
                 Name = $name
                 Description = $description
@@ -188,18 +175,17 @@ function Get-PackageInfo {
     }
 }
 
-# Create PluginConfig.json file
 function New-PluginConfig {
     param(
         [string]$PluginId,
         [hashtable]$PackageInfo,
         [string]$ProjectRoot
     )
-    
+
     $configFile = Join-Path $ProjectRoot 'PluginConfig.json'
-    
+
     Write-ColorOutput 'Creating PluginConfig.json file...' 'Blue'
-    
+
     $config = @{
         name = $PackageInfo.Name
         desc = $PackageInfo.Description
@@ -210,7 +196,7 @@ function New-PluginConfig {
         pluginKey = $PackageInfo.Name
         jsMainPath = 'index'
     }
-    
+
     try {
         $config | ConvertTo-Json -Depth 10 | Set-Content $configFile -Encoding UTF8
         Write-ColorOutput "PluginConfig.json file created: $configFile" 'Green'
@@ -221,14 +207,11 @@ function New-PluginConfig {
     }
 }
 
-# Advance the distributable plugin version before every package build.
-# PluginHost uses PluginConfig.json; keep versionCode monotonically increasing and
-# advance the final versionName component so the package visible on device matches.
 function Increment-PluginVersion {
     param([string]$ConfigFile)
 
     try {
-        $config = Get-Content $ConfigFile -Raw | ConvertFrom-Json
+        $config = Get-Content $ConfigFile -Raw -Encoding UTF8 | ConvertFrom-Json
         $oldCode = 0L
         if ($null -ne $config.versionCode) {
             [void][long]::TryParse([string]$config.versionCode, [ref]$oldCode)
@@ -262,28 +245,24 @@ function Increment-PluginVersion {
     }
 }
 
-# Update reactPackages field in PluginConfig.json
 function Update-PluginConfigPackages {
     param(
         [string]$ProjectRoot,
         [array]$FoundPackages,
         [string]$BuildGeneratedDir
     )
-    
-    # PluginConfig.json file in build/generated folder
+
     $configFile = Join-Path $BuildGeneratedDir 'PluginConfig.json'
-    
+
     if ($FoundPackages.Count -eq 0) {
         Write-ColorOutput 'No ReactPackage implementations found, skipping PluginConfig.json update' 'Yellow'
         return
     }
-    
+
     Write-ColorOutput 'Updating reactPackages field in build/generated folder''s PluginConfig.json...' 'Blue'
-    
+
     try {
-        # Check if PluginConfig.json exists in build/generated folder
         if (-not (Test-Path $configFile)) {
-            # If not exists, copy from project root
             $rootConfigFile = Join-Path $ProjectRoot 'PluginConfig.json'
             if (Test-Path $rootConfigFile) {
                 Copy-Item $rootConfigFile $configFile -Force
@@ -294,18 +273,27 @@ function Update-PluginConfigPackages {
                 return
             }
         }
-        
-        $config = Get-Content $configFile -Raw | ConvertFrom-Json
-        
-        # Convert PSCustomObject to Hashtable for modification
+
+        $config = Get-Content $configFile -Raw -Encoding UTF8 | ConvertFrom-Json
+
         $configHash = @{}
         $config.PSObject.Properties | ForEach-Object { $configHash[$_.Name] = $_.Value }
-        
-        # Always include our own InklingPackages
-        $allPackages = @('com.supernote_quicktoolbar.InklingPackages') + $FoundPackages
-        $configHash.reactPackages = $allPackages
-        
-        # Convert back to JSON and save
+
+        $allPackages = @('me.laumss.notipal.InklingPackages') + @($FoundPackages)
+        $seenPackages = @{}
+        $uniquePackages = @(
+            foreach ($package in $allPackages) {
+                $packageName = [string]$package
+                if ([string]::IsNullOrWhiteSpace($packageName) -or
+                    $seenPackages.ContainsKey($packageName)) {
+                    continue
+                }
+                $seenPackages[$packageName] = $true
+                $packageName
+            }
+        )
+        $configHash.reactPackages = $uniquePackages
+
         $configHash | ConvertTo-Json -Depth 10 | Set-Content $configFile -Encoding UTF8
         Write-ColorOutput 'PluginConfig.json in build/generated folder updated with reactPackages field' 'Green'
     }
@@ -314,19 +302,17 @@ function Update-PluginConfigPackages {
     }
 }
 
-# Find ReactPackage implementations in specified directory
 function Find-PackagesInDirectory {
     param(
         [string]$SearchDir,
         [string]$ResultFile,
         [ref]$FoundPackages
     )
-    
+
     if (-not (Test-Path $SearchDir)) {
         return
     }
-    
-    # Find ReactPackage implementations in Java and Kotlin files
+
     $javaFiles = Get-ChildItem -Path $SearchDir -Recurse -Filter '*.java' -File -ErrorAction SilentlyContinue
     $ktFiles = Get-ChildItem -Path $SearchDir -Recurse -Filter '*.kt' -File -ErrorAction SilentlyContinue
     $sourceFiles = @()
@@ -376,12 +362,7 @@ function Find-PackagesInDirectory {
     }
 }
 
-<#
-Function: Is-IgnoredModuleName
-Purpose: Determine whether a node_modules module should be ignored (RN official libraries and specified modules)
-Input: moduleName - module name, either '@scope/name' or 'name'
-Output: [bool] ignore flag
-#>
+
 function Is-IgnoredModuleName {
     param([string]$moduleName)
 
@@ -396,12 +377,7 @@ function Is-IgnoredModuleName {
     return $false
 }
 
-<#
-Function: Find-ProjectReactPackages
-Purpose: Scan project sources (android and app\android) to collect ReactPackage/TurboReactPackage implementation classes
-Input: ProjectRoot - project root path
-Output: [string[]] fully-qualified ReactPackage class names
-#>
+
 function Find-ProjectReactPackages {
     param([string]$ProjectRoot)
 
@@ -424,12 +400,7 @@ function Find-ProjectReactPackages {
     return $foundPackages
 }
 
-<#
-Function: Scan-NodeModulesNativeCode
-Purpose: Scan node_modules for third-party dependencies containing Java/Kotlin sources (ignore RN official libraries and sn-plugin-lib)
-Input: ProjectRoot - project root path
-Output: [string[]] third-party module names that include native sources
-#>
+
 function Scan-NodeModulesNativeCode {
     param([string]$ProjectRoot)
 
@@ -491,12 +462,7 @@ function Scan-NodeModulesNativeCode {
     return $modsWithNative
 }
 
-<#
-Function: Find-ManualReactPackagesFromApplication
-Purpose: Parse Application classes to extract ReactPackage/TurboReactPackage added via getPackages/add
-Input: ProjectRoot - project root path
-Output: [string[]] fully-qualified class names manually added
-#>
+
 function Find-ManualReactPackagesFromApplication {
     param([string]$ProjectRoot)
 
@@ -516,7 +482,6 @@ function Find-ManualReactPackagesFromApplication {
         foreach ($f in $files) {
             try {
                 $text = Get-Content $f.FullName -Raw -ErrorAction SilentlyContinue
-                # Strip comments to avoid matching example code
                 $text = ($text -replace '(?m)^\s*//.*$', '')
                 $text = ($text -replace '(?s)/\*.*?\*/', '')
                 $packageName = $null
@@ -570,7 +535,6 @@ function Find-ManualReactPackagesFromApplication {
                     }
                 }
 
-                # Kotlin add(ClassName()) or packages.add(ClassName())
                 $matchesKotlin = [System.Text.RegularExpressions.Regex]::Matches($text, '\badd\(\s*([A-Za-z0-9_\.]+)\s*\(')
                 foreach ($m in $matchesKotlin) {
                     $name = $m.Groups[1].Value
@@ -587,7 +551,6 @@ function Find-ManualReactPackagesFromApplication {
                     }
                 }
 
-                # Java packages.add(new ClassName()) or add(new ClassName())
                 $matchesJava = [System.Text.RegularExpressions.Regex]::Matches($text, '\b(?:packages\.)?add\(\s*new\s+([A-Za-z0-9_\.]+)\s*\(')
                 foreach ($m in $matchesJava) {
                     $name = $m.Groups[1].Value
@@ -613,12 +576,7 @@ function Find-ManualReactPackagesFromApplication {
     return $found
 }
 
-<#
-Function: Get-ReactPackagesFromAutolinkingSource
-Purpose: Parse autolinking-generated PackageList.java to extract getPackages entries and filter specified package names
-Input: ProjectRoot - project root path; Exclude - array of package names to exclude
-Output: [string[]] filtered fully-qualified package names
-#>
+
 function Get-ReactPackagesFromAutolinkingSource {
     param([string]$ProjectRoot, [string[]]$Exclude)
 
@@ -630,7 +588,6 @@ function Get-ReactPackagesFromAutolinkingSource {
 
     try {
         $text = Get-Content $srcFile -Raw
-        # Build import map
         $imports = @{}
         foreach ($line in ($text -split "`r?`n")) {
             if ($line -match '^\s*import\s+([^\s;]+)') {
@@ -639,7 +596,6 @@ function Get-ReactPackagesFromAutolinkingSource {
                 $imports[$short] = $fq
             }
         }
-        # Extract new ClassName() occurrences
         $matchesNew = [System.Text.RegularExpressions.Regex]::Matches($text, 'new\s+([A-Za-z0-9_\.]+)\s*\(')
         $pkgs = @()
         foreach ($m in $matchesNew) {
@@ -662,41 +618,36 @@ function Get-ReactPackagesFromAutolinkingSource {
     }
 }
 
-# Find ReactPackage implementations
 function Find-ReactPackages {
     param([string]$ProjectRoot)
-    
+
     Write-ColorOutput 'Starting to find and process dependencies with Android native code...' 'Green'
-    
+
     $resultFile = Join-Path $ProjectRoot 'android_native_deps.txt'
     'List of dependencies with Android native code:' | Set-Content $resultFile -Encoding UTF8
-    
-    # Store found ReactPackage implementation classes
+
     $foundPackages = @()
-    
-    # Find ReactPackage implementations in current project
+
     $androidDir = Join-Path $ProjectRoot 'android'
     if (Test-Path $androidDir) {
         Write-ColorOutput 'Finding ReactPackage implementations in current project...' 'Blue'
         '' | Add-Content $resultFile
         'ReactPackage implementations in current project:' | Add-Content $resultFile
-        
+
         Find-PackagesInDirectory -SearchDir $androidDir -ResultFile $resultFile -FoundPackages ([ref]$foundPackages)
-        
-        # If app directory exists, search there too
+
         $appAndroidDir = Join-Path $ProjectRoot 'app\android'
         if (Test-Path $appAndroidDir) {
             Find-PackagesInDirectory -SearchDir $appAndroidDir -ResultFile $resultFile -FoundPackages ([ref]$foundPackages)
         }
     }
-    
-    # Find and process dependencies in node_modules directory
+
     $nodeModulesDir = Join-Path $ProjectRoot 'node_modules'
     if (Test-Path $nodeModulesDir) {
         Write-ColorOutput 'Finding ReactPackage implementations in node_modules...' 'Blue'
         '' | Add-Content $resultFile
         'ReactPackage implementations in node_modules:' | Add-Content $resultFile
-        
+
         $candidateModules = Get-ChildItem -Path $nodeModulesDir -Directory
         foreach ($moduleDir in $candidateModules) {
             $moduleName = $moduleDir.Name
@@ -728,16 +679,64 @@ function Find-ReactPackages {
             }
         }
     }
-    
+
     Write-ColorOutput 'All dependencies processed!' 'Blue'
     Write-ColorOutput "Results saved to: $resultFile" 'Blue'
     Write-ColorOutput 'Final results:' 'Yellow'
     Get-Content $resultFile | Write-Host
-    
+
     return $foundPackages
 }
 
-# Execute Gradle build to generate APK (optionally enforcing reactPackages check)
+function Test-PluginConfigPackages {
+    param([string]$ConfigFile)
+
+    if (-not (Test-Path -LiteralPath $ConfigFile -PathType Leaf)) {
+        Write-ColorOutput "PluginConfig.json not found: $ConfigFile" 'Red'
+        return $false
+    }
+    try {
+        $config = Get-Content -LiteralPath $ConfigFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        $packages = @($config.reactPackages | ForEach-Object { [string]$_ } |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        $duplicates = @($packages | Group-Object | Where-Object { $_.Count -gt 1 })
+        if ($duplicates.Count -gt 0) {
+            $names = ($duplicates | ForEach-Object { $_.Name }) -join ', '
+            Write-ColorOutput "Duplicate reactPackages entries: $names" 'Red'
+            return $false
+        }
+        if ($packages -notcontains 'me.laumss.notipal.InklingPackages') {
+            Write-ColorOutput 'PluginConfig.json is missing me.laumss.notipal.InklingPackages' 'Red'
+            return $false
+        }
+        Write-ColorOutput "reactPackages validated: $($packages.Count) unique entries" 'Green'
+        return $true
+    }
+    catch {
+        Write-ColorOutput "Unable to validate reactPackages: $_" 'Red'
+        return $false
+    }
+}
+
+function Remove-NativeCodePackageReference {
+    param([string]$ConfigFile)
+
+    if (-not (Test-Path -LiteralPath $ConfigFile -PathType Leaf)) { return $true }
+    try {
+        $config = Get-Content -LiteralPath $ConfigFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        $property = $config.PSObject.Properties['nativeCodePackage']
+        if ($null -eq $property) { return $true }
+        $config.PSObject.Properties.Remove('nativeCodePackage')
+        $config | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $ConfigFile -Encoding UTF8
+        Write-ColorOutput "Removed nativeCodePackage reference from $ConfigFile" 'Yellow'
+        return $true
+    }
+    catch {
+        Write-ColorOutput "Unable to sanitize nativeCodePackage in $ConfigFile — $_" 'Red'
+        return $false
+    }
+}
+
 function Build-AndroidApk {
     param(
         [string]$ProjectRoot,
@@ -747,7 +746,7 @@ function Build-AndroidApk {
 
     if ($RequireReactPackagesCheck) {
         try {
-            $config = Get-Content $BuildGeneratedConfigFile -Raw | ConvertFrom-Json
+            $config = Get-Content $BuildGeneratedConfigFile -Raw -Encoding UTF8 | ConvertFrom-Json
             if (-not $config.reactPackages) {
                 Write-ColorOutput 'No reactPackages field in build/generated folder''s PluginConfig.json, skipping APK build' 'Yellow'
                 return $false
@@ -760,37 +759,31 @@ function Build-AndroidApk {
     }
 
     Write-ColorOutput 'Starting gradle build script to generate APK...' 'Blue'
-    
-    # Switch to android directory
+
     $androidDir = Join-Path $ProjectRoot 'android'
     if (-not (Test-Path $androidDir)) {
         Write-ColorOutput 'Cannot find android directory' 'Red'
         return $false
     }
-    
+
     $currentDir = Get-Location
     try {
         Set-Location $androidDir
 
-        # Always assemble Debug: :sn-plugin-lib:parseReleaseLocalResources fails
-        # with !directory.isDirectory(). Non-WithLogs still strips debug tools via
-        # -PinklingEnableDebug=false → BuildConfig.ENABLE_DEBUG=false.
         $apkTask = 'buildCustomApkDebug'
-        $debugProp = if ($script:WithLogs) { '-PinklingEnableDebug=true' } else { '-PinklingEnableDebug=false' }
+        $debugProp = if (Test-WithLogsEnabled) { '-PinklingEnableDebug=true' } else { '-PinklingEnableDebug=false' }
 
         $gradlewPath = Join-Path $androidDir 'gradlew.bat'
         if (Test-Path $gradlewPath) {
             Write-ColorOutput "Using gradlew.bat to execute $apkTask $debugProp..." 'Green'
-            
-            # Ensure JAVA_HOME environment variable is set
+
             if (-not $env:JAVA_HOME) {
                 Write-ColorOutput 'JAVA_HOME environment variable not set, trying to find Java installation...' 'Yellow'
-                # Try to find Java from registry or common paths
-                $javaPath = Get-ChildItem 'C:\Program Files\Java' -Directory -ErrorAction SilentlyContinue | 
-                           Where-Object { $_.Name -like 'jdk*' } | 
-                           Sort-Object Name -Descending | 
+                $javaPath = Get-ChildItem 'C:\Program Files\Java' -Directory -ErrorAction SilentlyContinue |
+                           Where-Object { $_.Name -like 'jdk*' } |
+                           Sort-Object Name -Descending |
                            Select-Object -First 1
-                
+
                 if ($javaPath) {
                     $env:JAVA_HOME = $javaPath.FullName
                     Write-ColorOutput "Set JAVA_HOME to: $($env:JAVA_HOME)" 'Green'
@@ -800,11 +793,9 @@ function Build-AndroidApk {
                     return $false
                 }
             }
-            
-            # Force English locale for javac/kotlinc output (avoids garbled CJK console text)
+
             $env:JAVA_TOOL_OPTIONS = '-Duser.language=en -Duser.country=US'
 
-            # Clean previous build to avoid stale cache
             Write-ColorOutput 'Cleaning previous build...' 'Blue'
             & cmd.exe /c "$gradlewPath clean"
             & cmd.exe /c "$gradlewPath $apkTask $debugProp"
@@ -819,7 +810,7 @@ function Build-AndroidApk {
             Write-ColorOutput 'Neither gradle nor gradlew.bat found, cannot build APK' 'Red'
             return $false
         }
-        
+
         if ($buildResult -eq 0) {
             Write-ColorOutput 'APK build successful' 'Green'
             return $true
@@ -834,47 +825,40 @@ function Build-AndroidApk {
     }
 }
 
-# Copy APK file and update nativeCodePackage field
 function Copy-ApkAndUpdateConfig {
     param([string]$ProjectRoot, [string]$BuildGeneratedDir, [string]$BuildGeneratedConfigFile)
-    
-    # Find generated APK file - prioritize custom APK
+
     $apkSearchPath = Join-Path $ProjectRoot 'android\app\build\outputs\apk'
-    
-    # First look for custom APK files
+
     $customApkFiles = Get-ChildItem -Path $apkSearchPath -Recurse -Filter '*custom*.apk' -ErrorAction SilentlyContinue
     $apkPath = $null
-    
+
     if ($customApkFiles) {
         $apkPath = $customApkFiles[0].FullName
         Write-ColorOutput "Found custom APK file: $apkPath" 'Green'
     }
     else {
-        # If no custom APK found, look for other APK files
         $apkFiles = Get-ChildItem -Path $apkSearchPath -Recurse -Filter '*.apk' -ErrorAction SilentlyContinue
         if ($apkFiles) {
             $apkPath = $apkFiles[0].FullName
             Write-ColorOutput "Found APK file: $apkPath" 'Green'
         }
     }
-    
+
     if (-not $apkPath -or -not (Test-Path $apkPath)) {
         Write-ColorOutput 'Generated APK file not found' 'Red'
         return $false
     }
-    
-    # Copy APK file to build/generated folder and rename to app.npk
+
     $newApkFileName = 'app.npk'
     $targetApkPath = Join-Path $BuildGeneratedDir $newApkFileName
-    
+
     try {
         if (Test-Path $targetApkPath) { Remove-Item $targetApkPath -Force }
         Copy-Item $apkPath $targetApkPath -Force
         Write-ColorOutput "APK file copied and renamed to build/generated folder: $targetApkPath" 'Green'
-        
-        # Check if PluginConfig.json exists in build/generated folder
+
         if (-not (Test-Path $BuildGeneratedConfigFile)) {
-            # If not exists, copy from project root
             $rootConfigFile = Join-Path $ProjectRoot 'PluginConfig.json'
             if (Test-Path $rootConfigFile) {
                 Copy-Item $rootConfigFile $BuildGeneratedConfigFile -Force
@@ -885,21 +869,17 @@ function Copy-ApkAndUpdateConfig {
                 return $false
             }
         }
-        
-        # Update nativeCodePackage field in build/generated folder's PluginConfig.json
-        $config = Get-Content $BuildGeneratedConfigFile -Raw | ConvertFrom-Json
-        
-        # Convert PSCustomObject to Hashtable for modification
+
+        $config = Get-Content $BuildGeneratedConfigFile -Raw -Encoding UTF8 | ConvertFrom-Json
+
         $configHash = @{}
         $config.PSObject.Properties | ForEach-Object { $configHash[$_.Name] = $_.Value }
-        
-        # Add or update nativeCodePackage field using relative path format
+
         $configHash.nativeCodePackage = "/$newApkFileName"
-        
-        # Convert back to JSON and save
+
         $configHash | ConvertTo-Json -Depth 10 | Set-Content $BuildGeneratedConfigFile -Encoding UTF8
         Write-ColorOutput "PluginConfig.json in build/generated folder updated with nativeCodePackage field: /$newApkFileName" 'Green'
-        
+
         return $true
     }
     catch {
@@ -908,16 +888,12 @@ function Copy-ApkAndUpdateConfig {
     }
 }
 
-# Execute React Native bundling command
 function Build-ReactNativeBundle {
     param([string]$ProjectRoot, [string]$ProjectName, [string]$OutputDir)
-    
+
     Write-ColorOutput 'Starting React Native bundling...' 'Blue'
 
-    # Log toggle: -WithLogs keeps JS/TS logs (debug build), default strips them (release build).
-    # Start-Process inherits env vars; child cmd/npx processes use WITH_LOGS to let babel decide.
-    # Don't clear WITH_LOGS so that pre-setting $env:WITH_LOGS='1' also works.
-    if ($script:WithLogs) {
+    if (Test-WithLogsEnabled) {
         $env:WITH_LOGS = '1'
         Write-ColorOutput 'Log mode: INCLUDED (WITH_LOGS=1, debug build)' 'Yellow'
     } elseif ($env:WITH_LOGS -eq '1') {
@@ -925,20 +901,35 @@ function Build-ReactNativeBundle {
     } else {
         Write-ColorOutput 'Log mode: STRIPPED (release build)' 'Blue'
     }
-    
-    # Build bundle output path and assets directory
+
+    Write-ColorOutput 'Copying mathjax from node_modules...' 'Blue'
+    & npm run copy-mathjax --prefix $ProjectRoot
+    if ($LASTEXITCODE -ne 0) {
+        Write-ColorOutput 'MathJax asset preparation failed; cannot continue bundling' 'Red'
+        return $false
+    }
+
+    $debugKeystore = Join-Path $androidDir 'app\debug.keystore'
+    if (-not (Test-Path $debugKeystore)) {
+        $keytool = if ($env:JAVA_HOME) { Join-Path $env:JAVA_HOME 'bin\keytool.exe' } else { 'keytool.exe' }
+        Write-ColorOutput 'debug.keystore missing; generating standard debug keystore...' 'Yellow'
+        & $keytool -genkeypair -v -keystore $debugKeystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 36500 -dname 'CN=Android Debug,O=Android,C=US' | Out-Null
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path $debugKeystore)) {
+            Write-ColorOutput 'Unable to generate android/app/debug.keystore' 'Red'
+            return $false
+        }
+    }
+
     $bundleOutput = Join-Path $OutputDir "$ProjectName.bundle"
     $assetsDir = $OutputDir
-    
-    # Build npx command
+
     $bundleCommand = "npx react-native bundle --entry-file index.js --bundle-output `"$bundleOutput`" --platform android --assets-dest `"$assetsDir`" --dev false"
-    
+
     Write-ColorOutput "Executing command: $bundleCommand" 'Yellow'
-    
+
     try {
-        # Execute bundling command
         $process = Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', $bundleCommand -Wait -PassThru -NoNewWindow -WorkingDirectory $ProjectRoot
-        
+
         if ($process.ExitCode -eq 0) {
             Write-ColorOutput 'React Native bundling successful' 'Green'
             Write-ColorOutput "Bundle file generated: $bundleOutput" 'Green'
@@ -954,14 +945,7 @@ function Build-ReactNativeBundle {
     }
 }
 
-# Parse PackageList.class and extract ReactPackage list from getPackages
-# Parse PackageList.class and extract ReactPackage list from getPackages
-<#
-Function: Get-ReactPackagesFromPackageListClass
-Purpose: Use javap to parse PackageList.class getPackages and extract ReactPackage class names
-Input: ClassesDir - classes root directory
-Output: [string[]] fully-qualified ReactPackage class names
-#>
+
 function Get-ReactPackagesFromPackageListClass {
     param([string]$ClassesDir)
 
@@ -993,12 +977,7 @@ function Get-ReactPackagesFromPackageListClass {
     }
 }
 
-<#
-Function: Find-ReactPackagesInClassesDir
-Purpose: Scan classes directory for classes implementing/extending ReactPackage/TurboReactPackage/BaseReactPackage/ViewManagerOnDemandReactPackage
-Input: ClassesDir - classes root directory
-Output: [string[]] fully-qualified ReactPackage-related class names
-#>
+
 function Find-ReactPackagesInClassesDir {
     param([string]$ClassesDir)
 
@@ -1040,50 +1019,39 @@ function Find-ReactPackagesInClassesDir {
     return $found
 }
 
-# Copy icon file and update iconPath field
 function Copy-IconAndUpdatePath {
     param([string]$ProjectRoot, [string]$BuildGeneratedDir, [string]$BuildGeneratedConfigFile)
-    
+
     Write-ColorOutput 'Checking and copying icon file...' 'Blue'
-    
+
     try {
-        # Read PluginConfig.json from project root
         $rootConfigFile = Join-Path $ProjectRoot 'PluginConfig.json'
-        $rootConfig = Get-Content $rootConfigFile -Raw | ConvertFrom-Json
-        
+        $rootConfig = Get-Content $rootConfigFile -Raw -Encoding UTF8 | ConvertFrom-Json
+
         if ($rootConfig.iconPath -and $rootConfig.iconPath -ne '') {
             $iconPath = $rootConfig.iconPath
             Write-ColorOutput "Detected icon path: $iconPath" 'Yellow'
-            
-            # Handle relative and absolute paths
+
             if ([System.IO.Path]::IsPathRooted($iconPath)) {
-                # Absolute path
                 $sourceIconPath = $iconPath
             } else {
-                # Relative path, relative to project root
                 $sourceIconPath = Join-Path $ProjectRoot $iconPath
             }
-            
+
             if (Test-Path $sourceIconPath) {
-                # Get icon file name
                 $iconFileName = Split-Path $sourceIconPath -Leaf
                 $targetIconPath = Join-Path $BuildGeneratedDir $iconFileName
-                
-                # Copy icon file
+
                 Copy-Item $sourceIconPath $targetIconPath -Force
                 Write-ColorOutput "Icon file copied to: $targetIconPath" 'Green'
-                
-                # Update iconPath field in build/generated folder's PluginConfig.json
-                $config = Get-Content $BuildGeneratedConfigFile -Raw | ConvertFrom-Json
-                
-                # Convert PSCustomObject to Hashtable for modification
+
+                $config = Get-Content $BuildGeneratedConfigFile -Raw -Encoding UTF8 | ConvertFrom-Json
+
                 $configHash = @{}
                 $config.PSObject.Properties | ForEach-Object { $configHash[$_.Name] = $_.Value }
-                
-                # Update iconPath to relative path from build/generated folder, ensure it starts with slash
+
                 $configHash.iconPath = "/$iconFileName"
-                
-                # Convert back to JSON and save
+
                 $configHash | ConvertTo-Json -Depth 10 | Set-Content $BuildGeneratedConfigFile -Encoding UTF8
                 Write-ColorOutput "Updated iconPath field in build/generated folder's PluginConfig.json: $iconFileName" 'Green'
             } else {
@@ -1098,12 +1066,11 @@ function Copy-IconAndUpdatePath {
     }
 }
 
-# Create build/outputs directory
 function New-BuildOutputsDirectory {
     param([string]$ProjectRoot)
-    
+
     $buildOutputsDir = Join-Path $ProjectRoot 'build\outputs'
-    
+
     try {
         if (-not (Test-Path $buildOutputsDir)) {
             New-Item -ItemType Directory -Path $buildOutputsDir -Force | Out-Null
@@ -1120,36 +1087,31 @@ function New-BuildOutputsDirectory {
     }
 }
 
-# Create zip package from build/generated directory
 function New-ZipPackage {
     param(
         [string]$SourceDir,
         [string]$DestinationPath
     )
-    
+
     Write-ColorOutput 'Starting to package build/generated directory...' 'Blue'
-    
+
     if (-not (Test-Path $SourceDir)) {
         Write-ColorOutput "Source directory does not exist: $SourceDir" 'Red'
         return $false
     }
-    
+
     try {
-        # Use PowerShell 5.0+ Compress-Archive command
         if (Get-Command 'Compress-Archive' -ErrorAction SilentlyContinue) {
-            # If target file already exists, delete it first
             if (Test-Path $DestinationPath) {
                 Remove-Item $DestinationPath -Force
             }
-            
-            # Get all files and folders in source directory
+
             $sourceItems = Get-ChildItem -Path $SourceDir -Recurse
             if ($sourceItems.Count -eq 0) {
                 Write-ColorOutput 'Source directory is empty, cannot create zip file' 'Yellow'
                 return $false
             }
-            
-            # Create zip file
+
             Compress-Archive -Path "$SourceDir\*" -DestinationPath $DestinationPath -Force
             Write-ColorOutput "Zip file created successfully: $DestinationPath" 'Green'
             return $true
@@ -1165,31 +1127,28 @@ function New-ZipPackage {
     }
 }
 
-# Rename zip file to project name.snplg
 function Rename-ToSnplgFile {
     param(
         [string]$ZipFilePath,
         [string]$ProjectName,
         [string]$OutputDir
     )
-    
+
     Write-ColorOutput 'Renaming zip file to .snplg format...' 'Blue'
-    
+
     if (-not (Test-Path $ZipFilePath)) {
         Write-ColorOutput "Zip file does not exist: $ZipFilePath" 'Red'
         return $null
     }
-    
+
     try {
         $snplgFileName = "$ProjectName.snplg"
         $snplgFilePath = Join-Path $OutputDir $snplgFileName
-        
-        # If target file already exists, delete it first
+
         if (Test-Path $snplgFilePath) {
             Remove-Item $snplgFilePath -Force
         }
-        
-        # Rename file
+
         Move-Item $ZipFilePath $snplgFilePath -Force
         Write-ColorOutput "File renamed to: $snplgFilePath" 'Green'
         return $snplgFilePath
@@ -1200,32 +1159,27 @@ function Rename-ToSnplgFile {
     }
 }
 
-# Main function
 function Main {
-    # Detect operating system
     Test-OperatingSystem
 
     $selfCheckOk = Self-CheckScriptIntegrity -ScriptPath $PSCommandPath
     if (-not $selfCheckOk) { return }
-    
-    # Set project root directory to current directory
+
     $projectRoot = Get-Location
     Write-ColorOutput "Project root directory: $projectRoot" 'Green'
-    
-    # Step 1: Check if build/generated directory exists, create if not
+
     Write-ColorOutput '=== Step 1: Check build/generated directory ===' 'Blue'
     $packageInfo = Get-PackageInfo -ProjectRoot $projectRoot
     $projectName = $packageInfo.name
     $buildGeneratedDir = Join-Path $projectRoot 'build\generated'
-    
+
     if (Test-Path $buildGeneratedDir) {
         Write-ColorOutput "Detected build/generated directory already exists: $buildGeneratedDir" 'Yellow'
     } else {
         New-Item -ItemType Directory -Path $buildGeneratedDir -Force | Out-Null
         Write-ColorOutput "Created build/generated directory: $buildGeneratedDir" 'Green'
     }
-    
-    # Patch: strip verbose console.log from sn-plugin-lib verifyParams (saves ~4s per modifyElements call)
+
     $verifyFiles = Get-ChildItem -Path (Join-Path $projectRoot 'node_modules\sn-plugin-lib') -Recurse -Filter 'VerifyUtils.*' -File -ErrorAction SilentlyContinue
     foreach ($vf in $verifyFiles) {
         if (Select-String -Path $vf.FullName -Pattern "console.log\('verifyParams'" -Quiet) {
@@ -1235,42 +1189,36 @@ function Main {
         }
     }
 
-    # Step 2: Run React Native bundling command
     Write-ColorOutput '=== Step 2: Execute React Native bundling ===' 'Blue'
     $bundleSuccess = Build-ReactNativeBundle -ProjectRoot $projectRoot -ProjectName $projectName -OutputDir $buildGeneratedDir
     if (-not $bundleSuccess) {
         Write-ColorOutput 'React Native bundling failed, script terminated' 'Red'
         return
     }
-    
-    # Step 3: Check if PluginConfig.json file exists in root directory
+
     Write-ColorOutput '=== Step 3: Check root directory PluginConfig.json ===' 'Blue'
     $rootConfigFile = Join-Path $projectRoot 'PluginConfig.json'
-    
+
     if (Test-Path $rootConfigFile) {
         Write-ColorOutput 'Detected root directory PluginConfig.json file already exists, skipping generation step' 'Yellow'
     } else {
-        # Step 4: Generate random string as pluginID
         Write-ColorOutput '=== Step 4: Generate random pluginID ===' 'Blue'
         $pluginId = New-RandomString
         Write-ColorOutput "Generated pluginID: $pluginId" 'Blue'
-        
-        # Step 5: Generate PluginConfig.json file in project root directory
+
         Write-ColorOutput '=== Step 5: Generate root directory PluginConfig.json ===' 'Blue'
         New-PluginConfig -PluginId $pluginId -PackageInfo $packageInfo -ProjectRoot $projectRoot
     }
 
-    # Every produced package gets a fresh host-visible version before it is copied.
     Increment-PluginVersion -ConfigFile $rootConfigFile
 
-    # Step 6: Copy root directory PluginConfig.json file to build/generated folder and handle icon file
     Write-ColorOutput '=== Step 6: Copy PluginConfig.json to build/generated folder and handle icon ===' 'Blue'
     $buildGeneratedConfigFile = Join-Path $buildGeneratedDir 'PluginConfig.json'
     Copy-Item $rootConfigFile $buildGeneratedConfigFile -Force
     Write-ColorOutput 'Copied root directory PluginConfig.json to build/generated folder' 'Green'
 
-    if ($script:WithLogs) {
-        $cfg = Get-Content $buildGeneratedConfigFile -Raw | ConvertFrom-Json
+    if (Test-WithLogsEnabled) {
+        $cfg = Get-Content $buildGeneratedConfigFile -Raw -Encoding UTF8 | ConvertFrom-Json
         $cfgHash = @{}
         $cfg.PSObject.Properties | ForEach-Object { $cfgHash[$_.Name] = $_.Value }
         $cfgHash.name = $cfgHash.name + ' - Dev'
@@ -1278,37 +1226,38 @@ function Main {
         Write-ColorOutput "Dev build: name set to '$($cfgHash.name)'" 'Yellow'
     }
 
-    # Copy icon file and update iconPath field
     Copy-IconAndUpdatePath -ProjectRoot $projectRoot -BuildGeneratedDir $buildGeneratedDir -BuildGeneratedConfigFile $buildGeneratedConfigFile
-    
-    # Step 7: Parse manually added packages from Application.getPackages
-    Write-ColorOutput '=== Step 7: Parse Application.getPackages (manually added packages) ===' 'Blue'
-    $projectReactPkgs = Find-ManualReactPackagesFromApplication -ProjectRoot $projectRoot
 
-    # Step 8: Scan node_modules for Java/Kotlin sources (ignore RN official libraries and sn-plugin-lib)
+    Write-ColorOutput '=== Step 7: Parse project ReactPackage implementations ===' 'Blue'
+    $projectReactPkgs = @()
+    $projectReactPkgs += Find-ProjectReactPackages -ProjectRoot $projectRoot
+    $projectReactPkgs += Find-ManualReactPackagesFromApplication -ProjectRoot $projectRoot
+    $projectReactPkgs = @($projectReactPkgs | Where-Object { $_ } | Sort-Object -Unique)
+    Write-ColorOutput "Project ReactPackage count: $($projectReactPkgs.Count)" 'Blue'
+
     Write-ColorOutput '=== Step 8: Scan node_modules for Android sources ===' 'Blue'
     $thirdPartyNativeMods = Scan-NodeModulesNativeCode -ProjectRoot $projectRoot
 
-    # Step 9: Build condition check; proceed to build if any condition matches, otherwise package directly
     Write-ColorOutput '=== Step 9: Build condition check ===' 'Blue'
     $shouldBuildNative = ($projectReactPkgs.Count -gt 0) -or ($thirdPartyNativeMods.Count -gt 0)
     if ($shouldBuildNative) {
         Write-ColorOutput "Build conditions met: project packages=$($projectReactPkgs.Count), third-party native modules=$($thirdPartyNativeMods.Count)" 'Green'
 
-        # Step 10: Invoke Gradle to build APK
         Write-ColorOutput '=== Step 10: Invoke Gradle to build APK ===' 'Blue'
         $buildSuccess = Build-AndroidApk -ProjectRoot $projectRoot -BuildGeneratedConfigFile $buildGeneratedConfigFile -RequireReactPackagesCheck:$false
 
-        # Step 11: Copy APK and update nativeCodePackage
         if ($buildSuccess) {
             Write-ColorOutput '=== Step 11: Copy APK and update nativeCodePackage ===' 'Blue'
             $apkCopied = Copy-ApkAndUpdateConfig -ProjectRoot $projectRoot -BuildGeneratedDir $buildGeneratedDir -BuildGeneratedConfigFile $buildGeneratedConfigFile
-            if (-not $apkCopied) { Write-ColorOutput 'Failed to copy APK or update configuration' 'Red' }
+            if (-not $apkCopied) {
+                Write-ColorOutput 'Failed to copy APK or update configuration; package generation stopped' 'Red'
+                return
+            }
         } else {
-            Write-ColorOutput 'Gradle build failed, skipping APK copy and configuration update' 'Red'
+            Write-ColorOutput 'Gradle build failed; native package generation stopped' 'Red'
+            return
         }
 
-        # Step 12: Parse Autolinking source PackageList.java, filter and merge
         Write-ColorOutput '=== Step 12: Parse Autolinking PackageList.java and merge lists ===' 'Blue'
         $excludePkgs = @('com.facebook.react.shell.MainReactPackage', 'com.ratta.supernote.pluginlib.PluginPackage')
         $pkgFromAutolinking = Get-ReactPackagesFromAutolinkingSource -ProjectRoot $projectRoot -Exclude $excludePkgs
@@ -1318,7 +1267,6 @@ function Main {
         $allPkgs += $pkgFromAutolinking
         $dedupPkgs = $allPkgs | Sort-Object -Unique
 
-        # Step 13: Write reactPackages field
         Write-ColorOutput '=== Step 13: Write reactPackages field ===' 'Blue'
         foreach ($p in $dedupPkgs) { Write-ColorOutput "  - write: $p" 'Green' }
         Update-PluginConfigPackages -ProjectRoot $projectRoot -FoundPackages $dedupPkgs -BuildGeneratedDir $buildGeneratedDir
@@ -1327,49 +1275,58 @@ function Main {
         Write-ColorOutput 'Build conditions not met; skipping steps 10–13 and proceeding to packaging' 'Yellow'
     }
 
-    # Step 14: Package and output .snplg
+    if (-not (Test-PluginConfigPackages -ConfigFile $buildGeneratedConfigFile)) {
+        Write-ColorOutput 'Manifest validation failed; package generation stopped' 'Red'
+        return
+    }
+
+    if (-not $shouldBuildNative -and
+        (-not (Remove-NativeCodePackageReference -ConfigFile $buildGeneratedConfigFile))) {
+        return
+    }
+
+    if ($shouldBuildNative -and
+        (-not (Test-Path -LiteralPath (Join-Path $buildGeneratedDir 'app.npk') -PathType Leaf))) {
+        Write-ColorOutput 'Native build was requested, but build/generated/app.npk is missing' 'Red'
+        return
+    }
+
     Write-ColorOutput 'Step 14: Package build/generated directory and generate .snplg file...' 'Green'
-    
-    # Create build/outputs directory
+
     $buildOutputsDir = New-BuildOutputsDirectory -ProjectRoot $projectRoot
     if (-not $buildOutputsDir) {
         Write-ColorOutput 'Unable to create build/outputs directory, skipping packaging step' 'Red'
         return
     }
-    
-    # Check if build/generated directory exists and is not empty
+
     if (-not (Test-Path $buildGeneratedDir)) {
         Write-ColorOutput 'build/generated directory does not exist, cannot package' 'Red'
         return
     }
-    
+
     $generatedItems = Get-ChildItem -Path $buildGeneratedDir -Recurse
     if ($generatedItems.Count -eq 0) {
         Write-ColorOutput 'build/generated directory is empty, cannot package' 'Yellow'
         return
     }
-    
-    # Create temporary zip file
+
     $tempZipFileName = 'temp_package.zip'
     $tempZipPath = Join-Path $buildOutputsDir $tempZipFileName
-    
-    # Package build/generated directory
+
     $zipResult = New-ZipPackage -SourceDir $buildGeneratedDir -DestinationPath $tempZipPath
     if (-not $zipResult) {
         Write-ColorOutput 'Packaging failed, unable to create zip file' 'Red'
         return
     }
-    
-    # Rename to .snplg file
-    $devSuffix = if ($script:WithLogs) { '-dev' } else { '' }
+
+    $devSuffix = if (Test-WithLogsEnabled) { '-dev' } else { '' }
     $snplgFileName = "$($packageInfo.Name)$devSuffix.snplg"
     $finalSnplgPath = Join-Path $buildOutputsDir $snplgFileName
     $outputName = "$($packageInfo.Name)$devSuffix"
-    $null = Rename-ToSnplgFile -ZipFilePath $tempZipPath -ProjectName $outputName -OutputDir $buildOutputsDir
-    if (Test-Path $finalSnplgPath) {
+    $renamedPath = Rename-ToSnplgFile -ZipFilePath $tempZipPath -ProjectName $outputName -OutputDir $buildOutputsDir
+    if ($renamedPath -and (Test-Path -LiteralPath $finalSnplgPath -PathType Leaf)) {
         Write-ColorOutput "Plugin package successfully generated: $finalSnplgPath" 'Green'
-        
-        # Display file size information
+
         $fileInfo = Get-Item -LiteralPath $finalSnplgPath
         $fileSizeMB = [math]::Round($fileInfo.Length / 1MB, 2)
         Write-ColorOutput "File size: $fileSizeMB MB" 'Blue'
@@ -1378,13 +1335,7 @@ function Main {
     }
 }
 
-# Resolve classes root directory (automatically pick latest compile*JavaWithJavac/classes path)
-<#
-Function: Resolve-ClassesDir
-Purpose: Automatically locate the Android compiled classes directory
-Input: ProjectRoot - project root path
-Output: [string] classes directory path (empty string if not found)
-#>
+
 function Resolve-ClassesDir {
     param([string]$ProjectRoot)
 
@@ -1399,5 +1350,4 @@ function Resolve-ClassesDir {
     return ''
 }
 
-# Execute main function
 Main

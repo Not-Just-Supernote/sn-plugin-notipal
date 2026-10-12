@@ -21,6 +21,10 @@ const TOP_MARGIN_BASE     = 150;
 
 const BASE_PAGE_HEIGHT    = 1872;
 
+
+
+
+
 let _presetNotePath: string | null = null;
 let _presetPageSize: { width: number; height: number } | null = null;
 
@@ -31,16 +35,16 @@ export function presetPageInfo(notePath: string, size: { width: number; height: 
 }
 
 const FONT_SIZE         = 36;
-// Must mirror TextLayoutEngine.kt: NOTE renders textboxes taller than
-// StaticLayout.height (42px device line height + frame inset); without this
-// the last line's bottom quarter clips. Applied on top of split fittingHeight.
+
+
+
 const NOTE_RENDER_PAD   = 28;
-// Mirrors TextLayoutEngine.DEVICE_LINE_HEIGHT / emojiExtraHeight: the NOTE
-// app renders emoji wider than StaticLayout measures → device wraps extra
-// lines. Reserve one device line per 4 emoji in split measurement too.
+
+
+
 const DEVICE_LINE_HEIGHT = 42;
-// Mirrors TextLayoutEngine's long-box allowance for NOTE's system font, whose
-// wrap width differs from PluginHost StaticLayout despite the width adjustment.
+
+
 const SYSTEM_FONT_WRAP_SAFETY_RATIO = 0.15;
 const SYSTEM_FONT_WRAP_SAFETY_MIN_LINES = 8;
 const EMOJI_PER_EXTRA_LINE = 4;
@@ -56,17 +60,17 @@ function systemFontWrapExtraHeight(lineCount: number): number {
   if (lineCount < SYSTEM_FONT_WRAP_SAFETY_MIN_LINES) return 0;
   return Math.ceil(lineCount * SYSTEM_FONT_WRAP_SAFETY_RATIO) * DEVICE_LINE_HEIGHT;
 }
-// Must mirror TextLayoutEngine.WIDTH_ADJUSTMENT: the NOTE app wraps text
-// ~30px narrower than the frame rect, so split measurement must use the
-// same reduced width or the device wraps more lines than we budgeted for.
+
+
+
 const WIDTH_ADJUSTMENT  = 30;
 const INTERVAL_MS       = 200;
 
 const PEN_SAFE_GAP_MS   = 2000;
 
-// The note app re-loads its page layers right after returning to the
-// foreground; inserting a text box during that window crashes its native
-// redraw. Wait this long after a foreground return before inserting.
+
+
+
 const NOTE_FOREGROUND_SETTLE_MS = 1500;
 
 const SDK_TIMEOUT_MS    = 8000;
@@ -128,6 +132,12 @@ export class TextInserter {
   private pageNextLeft = new Map<number, number>();
 
   private _bubbleAnchorTop: number = -1;
+  private _bubbleAnchorLeft: number = -1;
+
+  
+  
+  private _waitingForPageTap = false;
+  private _waitingForPageTurn = false;
 
   private timerRef: ReturnType<typeof setTimeout> | null = null;
   private activeMode: InsertMode | null = null;
@@ -148,9 +158,9 @@ export class TextInserter {
   private _occupiedRanges: OccupiedRange[] = [];
   private _occupiedPage = -1;
 
-  // Inserts are held until this timestamp. Set when the note app returns to
-  // the foreground: inserting while it is still re-loading its page layers
-  // can crash the note's native redraw (SIGSEGV in redrawTrails).
+  
+  
+  
   private _holdInsertsUntil = 0;
 
   private _expectedTotalPages = -1;
@@ -160,14 +170,18 @@ export class TextInserter {
 
   private onNoteChanged?: (reason: 'note_switched' | 'pages_changed', detail: string) => void;
 
+  private onPageWaitChanged?: (waiting: boolean, queueLength: number) => void;
+
   constructor(
     onAck?: (text: string, success: boolean, error: string | null) => void,
     onPositionChanged?: (page: number, nextTop: number, source: TextSource, isPageChange: boolean) => void,
     onNoteChanged?: (reason: 'note_switched' | 'pages_changed', detail: string) => void,
+    onPageWaitChanged?: (waiting: boolean, queueLength: number) => void,
   ) {
     this.onAck = onAck;
     this.onPositionChanged = onPositionChanged;
     this.onNoteChanged = onNoteChanged;
+    this.onPageWaitChanged = onPageWaitChanged;
   }
 
   private _topMargin(): number {
@@ -176,16 +190,16 @@ export class TextInserter {
   }
 
   enqueue(text: string, source: TextSource = 'unknown') {
-    // The note renders plain text only: drop markdown heading markers
-    // ("# "…"###### " at line starts) instead of inserting them literally.
+    
+    
     text = text.replace(/^#{1,6}\s+/gm, '');
-    // Same for blockquote markers: strip leading "> " (incl. nested ">> ").
+    
     text = text.replace(/^(?:>\s?)+/gm, '');
     this.textQueue.push({ text, source });
 
-    if (this.activeMode && !this._paused) this._registerPenUp();
+    if (this.activeMode && !this._paused && !this._waitingForPageTap) this._registerPenUp();
 
-    if (this.activeMode && !this.inserting && !this._paused) {
+    if (this.activeMode && !this.inserting && !this._paused && !this._waitingForPageTap) {
       if (this.timerRef === null) {
 
         console.log('[TextInserter]: waking up from enqueue');
@@ -204,6 +218,8 @@ export class TextInserter {
 
   clearQueue() {
     this.textQueue = [];
+    this._waitingForPageTurn = false;
+    this._setWaitingForPageTap(false);
   }
 
   getQueueLength(): number {
@@ -220,6 +236,7 @@ export class TextInserter {
     return out;
   }
 
+  
   isBusy(): boolean {
     return this.inserting;
   }
@@ -229,7 +246,7 @@ export class TextInserter {
   }
 
   hasLiveTimers(): boolean {
-    return this.timerRef !== null;
+    return this.timerRef !== null || this._waitingForPageTap || this._waitingForPageTurn;
   }
 
   getMode(): InsertMode | null {
@@ -263,7 +280,24 @@ export class TextInserter {
   }
 
   isWaitingPage(): boolean {
-    return this.activeMode !== null && this.currentPage < this.targetPage;
+    return this.activeMode !== null
+      && (this._waitingForPageTurn || this._waitingForPageTap || this.currentPage < this.targetPage);
+  }
+
+  isWaitingForPageTap(): boolean {
+    return this._waitingForPageTap;
+  }
+
+  
+  continueAfterPageTap(): boolean {
+    if (!this._waitingForPageTap) return false;
+    this._setWaitingForPageTap(false);
+    if (this.activeMode && this.textQueue.length > 0 && !this.inserting && !this._paused) {
+      this._registerPenUp();
+      this.timerRef = 1 as any;
+      this._scheduleNext(this.activeMode);
+    }
+    return true;
   }
 
   getNotePath(): string {
@@ -294,7 +328,7 @@ export class TextInserter {
     this.onPositionChanged?.(this.targetPage, clamped, 'unknown', false);
   }
 
-  /** Delay any insertText for [ms] from now (e.g. note app just resumed). */
+  
   holdInserts(ms: number) {
     const until = Date.now() + ms;
     if (until > this._holdInsertsUntil) {
@@ -314,10 +348,12 @@ export class TextInserter {
   forceSetNextLeft(left: number): number | undefined {
     if (left < 0) {
       this.pageNextLeft.delete(this.targetPage);
+      this._bubbleAnchorLeft = -1;
       return undefined;
     }
     const geometry = this._normalizeNextLeft(left);
     this.pageNextLeft.set(this.targetPage, geometry.left);
+    this._bubbleAnchorLeft = geometry.left;
     console.log('[TextInserter]: forceSetNextLeft page=', this.targetPage,
       'requested=', left, 'normalized=', geometry.left, 'safeMax=', geometry.safeMaxLeft,
       'minWidth=', geometry.minTextboxWidth);
@@ -331,6 +367,7 @@ export class TextInserter {
     this.pageNextTop.set(this.targetPage, clampedTop);
     this.pageNextLeft.set(this.targetPage, geometry.left);
     this._bubbleAnchorTop = clampedTop;
+    this._bubbleAnchorLeft = geometry.left;
     console.warn('[TextInserter/DIAG]: setNextInsertionAnchor source=', source,
       'page=', this.targetPage, 'requested=', JSON.stringify({ top, left }),
       'normalized=', JSON.stringify({ top: clampedTop, left: geometry.left }),
@@ -344,9 +381,18 @@ export class TextInserter {
   getTargetPage(): number { return this.targetPage; }
 
   relocateTo(page: number): void {
+    const previousTarget = this.targetPage;
     this.targetPage = page;
     this.currentPage = page;
-    console.log('[TextInserter]: relocateTo page=', page);
+    if (page !== previousTarget) {
+      const carriedTop = this._bubbleAnchorTop > 0 ? this._bubbleAnchorTop : this._topMargin();
+      this.pageNextTop.set(page, carriedTop);
+      if (this._bubbleAnchorLeft >= 0) {
+        this.pageNextLeft.set(page, this._bubbleAnchorLeft);
+      }
+      console.log('[TextInserter]: relocateTo page=', page,
+        'carriedAnchor=', JSON.stringify({ top: carriedTop, left: this._bubbleAnchorLeft }));
+    }
   }
 
   getNextTop(): number {
@@ -359,6 +405,12 @@ export class TextInserter {
 
   getPageSize(): { width: number; height: number } | null {
     return this.pageSize;
+  }
+
+  private _setWaitingForPageTap(waiting: boolean): void {
+    if (this._waitingForPageTap === waiting) return;
+    this._waitingForPageTap = waiting;
+    this.onPageWaitChanged?.(waiting, this.textQueue.length);
   }
 
   switchMode(newMode: InsertMode): boolean {
@@ -416,11 +468,14 @@ export class TextInserter {
       this.pageNextTop.clear();
       this.pageNextLeft.clear();
       this._bubbleAnchorTop = -1;
+      this._bubbleAnchorLeft = -1;
     }
     this.activeMode = mode;
     this.lastPenUpAt = 0;
     this.inserting = false;
     this._paused = false;
+    this._waitingForPageTurn = false;
+    this._setWaitingForPageTap(false);
 
     try {
       const fpRes = await sdkCall(PluginCommAPI.getCurrentFilePath(), 'getCurrentFilePath');
@@ -444,6 +499,7 @@ export class TextInserter {
 
       let psRes: any = null;
       if (_presetNotePath && _presetPageSize && _presetNotePath === this.notePath) {
+        
         psRes = { success: true, result: { ..._presetPageSize } };
         console.log('[TextInserter]: pageSize from preset cache →', JSON.stringify(psRes.result));
       } else {
@@ -499,6 +555,8 @@ export class TextInserter {
     if (clearActive) {
       this.activeMode = null;
       this._paused = false;
+      this._waitingForPageTurn = false;
+      this._setWaitingForPageTap(false);
       this._unregisterPenUp();
     }
   }
@@ -613,14 +671,14 @@ export class TextInserter {
       return 'continue';
     }
 
-    // Authoritative anti-race gate: ask the native side directly how long the
-    // note app has been foreground. The event-based holdInserts() above can
-    // lose the race (native flag flips before the JS event lands), which let
-    // an insertText hit the note 26ms into its page reload and crash it.
+    
+    
+    
+    
     try {
       const elapsed = FloatingToolbar?.getNoteForegroundElapsedMs?.();
       if (typeof elapsed === 'number' && elapsed < NOTE_FOREGROUND_SETTLE_MS) {
-        return 'continue'; // covers elapsed === -1 (not in note app) too
+        return 'continue'; 
       }
     } catch (_) {}
 
@@ -645,13 +703,13 @@ export class TextInserter {
     const rawLines = text.split('\n');
     const rawLineCount = rawLines.length;
     const emptyLineCount = rawLines.filter(l => l.trim().length === 0).length;
-    // Strip <t>...</t> thinking blocks (may span multiple lines)
+    
     text = text.replace(/<t>[\s\S]*?<\/t>\s*/g, '');
-    // Strip unclosed <t> at end of text (last thinking block cut by split)
+    
     text = text.replace(/<t>[^]*$/g, '');
-    // Strip orphaned </t> at/near start (relay chunks at 600 chars; a <t>
-    // block spanning the boundary leaves the second chunk starting with
-    // "...thinking</t>actual reply" — no opening <t> for our regexes above).
+    
+    
+    
     text = text.replace(/^[^]*?<\/t>\s*/g, '');
     text = text.replace(/^(\d+)\./gm, '$1\u200B.');
     text = text.replace(/\*/g, '');
@@ -735,9 +793,22 @@ export class TextInserter {
           FileLogger.logEvent('PageAutoRelocate',
             `target=${this.targetPage} → current=${this.currentPage}`);
           this.relocateTo(this.currentPage);
-          const relocTop = this._bubbleAnchorTop > 0 ? this._bubbleAnchorTop : this._topMargin();
-          this.pageNextTop.set(this.currentPage, relocTop);
-          console.log('[TextInserter]: relocate set top=', relocTop, 'bubbleAnchor=', this._bubbleAnchorTop);
+          const relocTop = this.getNextTop();
+          console.log('[TextInserter]: relocate set anchor=', JSON.stringify({
+            top: relocTop,
+            left: this.getNextLeft(),
+          }));
+          if (this._waitingForPageTurn) {
+            if (isFromQueue) {
+              this.textQueue.unshift({ text, source: itemSource });
+            }
+            this._waitingForPageTurn = false;
+            this._setWaitingForPageTap(true);
+            FileLogger.logEvent('PageTurnReady',
+              `page=${this.currentPage} queueLen=${this.textQueue.length}`);
+            this.onPositionChanged?.(this.currentPage, relocTop, itemSource, false);
+            return 'pause';
+          }
           this.onPositionChanged?.(this.currentPage, relocTop, itemSource, true);
         }
       }
@@ -898,6 +969,7 @@ export class TextInserter {
       // which breaks undo/redo). Instead pause and let the user decide.
       console.log('[TextInserter]: page full, pausing (remaining queue=', this.textQueue.length, ')');
       FileLogger.logEvent('PageFull', `page=${this.targetPage} queueLen=${this.textQueue.length}`);
+      this._waitingForPageTurn = true;
       return 'pause';
     }
 
@@ -1007,7 +1079,7 @@ export class TextInserter {
   }
 
   private _scheduleNext(mode: InsertMode) {
-    if (this._paused || this.timerRef === null || this.textQueue.length === 0) {
+    if (this._paused || this._waitingForPageTap || this.timerRef === null || this.textQueue.length === 0) {
       this.timerRef = null;
 
       this._unregisterPenUp();
@@ -1038,10 +1110,15 @@ export class TextInserter {
           this._deferNextTick(mode, INTERVAL_MS);
         }
       } else if (result === 'pause') {
-
-        console.log('[TextInserter]: page changed, continuing after delay');
-        this.timerRef = 1 as any;
-        this._deferNextTick(mode, 800);
+        if (this._waitingForPageTap) {
+          this.timerRef = null;
+          this._unregisterPenUp();
+          console.log('[TextInserter]: page full, waiting for bubble tap');
+        } else {
+          console.log('[TextInserter]: waiting for forward page turn');
+          this.timerRef = 1 as any;
+          this._deferNextTick(mode, 800);
+        }
       } else {
         this.timerRef = null;
         this.activeMode = null;
@@ -1061,6 +1138,10 @@ export class TextInserter {
   private async _checkNoteContext(): Promise<boolean> {
     try {
 
+      // 非笔记前台（切到 relay/其他 app）时 getCurrentFilePath 返回的不是本
+      // 笔记路径，不能据此判定"换笔记"——那会误 stop(true) 永久拆掉插入循环，
+      // 切回笔记后队列僵死、需手动点工具栏才恢复。此时交给 _insertParagraph
+      // 的 foreground gate（elapsed<0 → continue）暂停等待即可。
       const fgElapsed = FloatingToolbar?.getNoteForegroundElapsedMs?.();
       const notInNoteApp = typeof fgElapsed === 'number' && fgElapsed < 0;
 
