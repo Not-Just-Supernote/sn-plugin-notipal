@@ -6,17 +6,19 @@ import { TextInserter, InsertMode, TextSource, presetPageInfo } from './TextInse
 import { FileLogger } from './FileLogger';
 import LocalSendBridge, { TextReceivedInfo } from './LocalSendBridge';
 import { LassoExtractor } from './LassoExtractor';
-import FloatingBubbleBridge, { AiBubbleBridge } from './BubbleBridges';
+import FloatingBubbleBridge, { AiBubbleBridge, PaletteBubbleBridge } from './BubbleBridges';
 
-import { loadAiBubbleActions, resolveAiBubbleActions } from './ToolPresets';
+import { loadAiBubbleActions, resolveAiBubbleActions, loadAiSelectionMode, saveAiSelectionMode, AiSelectionMode } from './ToolPresets';
+import { PenLasso, SelectionPage, readSelectionPage, isSameSelectionPage, hasSelectedContent } from './PenTools';
 import { sendFormulaQuery, processRelayBlocks } from './FormulaService';
 import { t } from './i18n';
 import FloatingToolbarBridge from './FloatingToolbarBridge';
+import { TOOL_IDS } from './ToolIdentifiers';
 
 const { AIRelayModule } = NativeModules;
 
-// Preserve the device's previous effective reply start: the 36dp receive
-// bubble mapped to ~48 page px, plus the existing 4px text gap.
+
+
 const AI_REPLY_GAP_PX = 52;
 const LAST_MODE_STORE_KEY = 96;
 
@@ -50,7 +52,6 @@ let _aiSendInFlight = false;
 let _lastAiSendText = '';
 const AI_SAME_TEXT_DEBOUNCE_MS = 8000;
 
-let _aiLongPressSub: { remove(): void } | null = null;
 
 let _blocksSub: { remove(): void } | null = null;
 let _replaceSub: { remove(): void } | null = null;
@@ -58,27 +59,108 @@ let _replaceSub: { remove(): void } | null = null;
 let _nativePanelCloseSub: { remove(): void } | null = null;
 
 let _noteForegroundSub: { remove(): void } | null = null;
+let _mosaicSurfaceSub: { remove(): void } | null = null;
+let _hostAppModeSub: { remove(): void } | null = null;
 
-let _cachedAiBubbleActionIds: string[] = [];
+let _cachedAiBubbleActionIds: string[] = ['lasso_ai', 'screenshot_ai', 'copilot'];
+let _aiSelectionMode: AiSelectionMode = 'text';
+let _aiSelectionModeTouched = false;
+let _aiSelectionBusy = false;
+let _aiSelectionEpoch = 0;
+let _aiScreenshotInFlight = false;
+
+export interface AiSelectionRequest {
+  expectedPage?: SelectionPage;
+  canContinue?: () => boolean;
+  fresh?: boolean;
+}
+
+async function selectionRequestIsCurrent(request?: AiSelectionRequest): Promise<boolean> {
+  if (request?.canContinue && !request.canContinue()) return false;
+  if (request?.expectedPage && !await isSameSelectionPage(request.expectedPage)) return false;
+  return !request?.canContinue || request.canContinue();
+}
 
 let _aiActive = false;
 let _relayEnabled = false;
 
 let _aiPositionLocked = false;
 
+
+
+
 let _pendingCards: { text: string; source: TextSource }[] = [];
+
+
+
+
+let _mosaicTextActive = false;
+let _mosaicTextBuffer: string[] = [];
 
 let _switchVersion = 0;
 
 let _localSendStarted = false;
+let _localSendStartPromise: Promise<boolean> | null = null;
+let _localSendGen = 0;
 
-// Relay inbox previews (capsule bars under the AI status pill).
+
 type InboxItem = { id: string; title: string; preview: string; source: string; time: number; pinned?: boolean };
 let _relayInboxSub: { remove(): void } | null = null;
 let _inboxItems: InboxItem[] = [];
-// AI-bubble session start: capsules only show messages newer than this
-// (or relay-pinned ones). Reset on every open/close of the AI bubble.
+
+
 let _aiSessionStart = 0;
+
+
+
+
+
+let _autoOpenDetail = true;
+
+let _dismissedCapsuleIds = new Set<string>();
+
+let _capsuleOpenCount: Record<string, number> = {};
+
+let _autoOpenedIds = new Set<string>();
+
+let _currentCapsuleDetailId: string | null = null;
+
+let _lastPermissionTipAt = 0;
+
+async function _ensurePermanentTextReceiverPermissions(): Promise<boolean> {
+  const readGranted = await FloatingToolbarBridge.requestFileReadPermission();
+  const writeGranted = readGranted
+    ? await FloatingToolbarBridge.requestFileWritePermission()
+    : false;
+  const ready = readGranted && writeGranted;
+  console.log('[BackgroundService]: text receiver permanent permissions',
+    'read=', readGranted, 'write=', writeGranted, 'ready=', ready);
+  if (!ready && Date.now() - _lastPermissionTipAt > 1500) {
+    _lastPermissionTipAt = Date.now();
+    NativeUIUtils.showErrorTipDialog(t('initial_permissions_required'));
+  }
+  return ready;
+}
+
+async function _startTextInserter(
+  inserter: TextInserter,
+  mode: InsertMode,
+  preservePosition = false,
+): Promise<boolean> {
+  if (!await _ensureTextReceiverRuntime()) {
+    _activeMode = null;
+    _pushActiveModes();
+    emitInsertMode(null);
+    if (FloatingBubbleBridge.isAvailable) FloatingBubbleBridge.hide();
+    return false;
+  }
+  return inserter.start(mode, preservePosition);
+}
+
+async function _ensureTextReceiverRuntime(): Promise<boolean> {
+  if (!await _ensurePermanentTextReceiverPermissions()) return false;
+  return startLocalSend();
+}
 
 function clearAiTimeout(): void {
   if (_aiTimeoutRef !== null) {
@@ -88,13 +170,15 @@ function clearAiTimeout(): void {
 }
 
 function _aiReadyText(): string {
-  return _relayEnabled ? t('bubble_ai_ready') : t('bubble_relay_off');
+  return _relayEnabled
+    ? t(_aiSelectionMode === 'formula' ? 'bubble_formula_ready' : 'bubble_ai_ready')
+    : t('bubble_relay_off');
 }
 
 function _resolvedAiBubbleActions() {
-  // Co is a fixed "open inbox" button now; communication is started by the
-  // collected ball tap, so its icon no longer flips between Co/On.
-  return resolveAiBubbleActions(_cachedAiBubbleActionIds);
+  
+  
+  return resolveAiBubbleActions(_cachedAiBubbleActionIds, _aiSelectionMode);
 }
 
 function _syncRelayUi(): void {
@@ -130,12 +214,7 @@ async function _toggleAirRelay(): Promise<void> {
   }
 }
 
-/**
- * Start AIRelay (idempotent) and expand the collected ball into the full
- * bubble. Used by the single-button entry: one tap starts communication and
- * reveals the capsule bar + action row. Unlike _toggleAirRelay it never turns
- * AIRelay back off — the dedicated on/off switch is gone.
- */
+
 async function _startAirRelayAndExpand(): Promise<void> {
   try {
     if (!_relayEnabled) {
@@ -158,6 +237,9 @@ function emitInsertMode(mode: InsertMode | null): void {
   DeviceEventEmitter.emit('insertModeChanged', { mode });
 }
 
+
+
+
 function _syncHeartbeat(): void {
   const want = _activeMode !== null || _aiActive;
   try {
@@ -168,9 +250,9 @@ function _syncHeartbeat(): void {
 
 function _pushActiveModes(): void {
   const modes: string[] = [];
-  if (_activeMode) modes.push('insert_text');
+  if (_activeMode || _mosaicTextActive) modes.push('insert_text');
   if (_aiActive) {
-    modes.push('voice_transcribe');
+    modes.push(TOOL_IDS.AI_RELAY);
   }
   FloatingToolbarBridge.setActiveModes(modes);
   _syncHeartbeat();
@@ -185,6 +267,11 @@ function reviveBridge(): void {
   }
 
   AIRelayModule.startListening();
+  
+  
+  
+  
+  try { AIRelayModule.startInboxListening?.(); } catch (_) {}
 
   const bbEmitter = new NativeEventEmitter(AIRelayModule);
   _broadcastTextSub = bbEmitter.addListener('onTextFromRelay', (text: string) => {
@@ -200,12 +287,28 @@ function reviveBridge(): void {
       if (AiBubbleBridge.isAvailable) AiBubbleBridge.updateText(_aiReadyText());
     }
 
-    // long-press) — replies themselves arrive via the inbox broadcast.
-    // Always insert, and insert at the page the user is looking at NOW:
-    // the inserter's target page was fixed when the mode started and the
-    // user may have turned pages since (the text would silently go to the
-    // old page, looking like "insert did nothing").
+    
+    
+    
+    if (_mosaicTextEngaged() || _isMosaicBoard()) {
+      _stageMosaicText(text, 'broadcast');
+      return;
+    }
+    if (_inDocument()) {
+      _rejectDocInsert('text');
+      return;
+    }
+
+    
+    
+    
+    
+    
+    
     if (!_textInserter) return;
+    
+    
+    
     if (_activeMode) {
       _stagePendingCard(text, 'broadcast');
       return;
@@ -218,7 +321,7 @@ function reviveBridge(): void {
         inserter.resume();
         ok = true;
       } else if (!ok) {
-        ok = await inserter.start('nospacing');
+        ok = await _startTextInserter(inserter, 'nospacing');
       }
       if (!ok) return;
 
@@ -239,6 +342,7 @@ function reviveBridge(): void {
     })().catch(e => console.error('[BackgroundService]: relay text receiver start error:', e));
   });
 
+  
   _blocksSub?.remove();
   _blocksSub = bbEmitter.addListener('onBlocksFromRelay',
     (payload: { text: string; blocks: string }) => {
@@ -246,6 +350,7 @@ function reviveBridge(): void {
         console.error('[BackgroundService]: onBlocksFromRelay error:', e));
     });
 
+  
   _replaceSub?.remove();
   _replaceSub = bbEmitter.addListener('onReplaceFromRelay',
     (payload: { text: string; blocks: string }) => {
@@ -271,13 +376,26 @@ async function handleRelayBlocks(
     if (AiBubbleBridge.isAvailable) AiBubbleBridge.updateText(_aiReadyText());
   }
 
+  
+  
+  if (_mosaicTextEngaged() || _isMosaicBoard()) {
+    const flat = (payload.text ?? '').trim();
+    if (flat.length > 0) _stageMosaicText(flat, 'broadcast');
+    return;
+  }
+  if (_inDocument()) {
+    _rejectDocInsert(replace ? 'replace' : 'blocks');
+    return;
+  }
+
   if (!_textInserter) return;
 
+  
   if (_textInserter.isPaused()) {
     _textInserter.resume();
   } else if (!_textInserter.isRunning()) {
     _textInserter.clearQueue();
-    const ok = await _textInserter.start('nospacing');
+    const ok = await _startTextInserter(_textInserter, 'nospacing');
     if (ok) {
       _activeMode = 'nospacing';
       _pushActiveModes();
@@ -285,6 +403,7 @@ async function handleRelayBlocks(
     }
   }
 
+  
   try {
     const pgRes: any = await PluginCommAPI.getCurrentPageNum();
     if (pgRes?.success && typeof pgRes.result === 'number'
@@ -302,6 +421,9 @@ async function handleRelayBlocks(
       }
       _textInserter?.enqueue(text, 'broadcast');
     },
+    
+    
+    
     waitTextIdle: async () => {
       const ti = _textInserter;
       if (!ti) return null;
@@ -316,6 +438,8 @@ async function handleRelayBlocks(
       await new Promise<void>(r => setTimeout(r, 200));
       return ti.getNextTop();
     },
+    
+    
     onEmbedded: (bottom, left) => {
       const anchor = setProgrammaticInsertionAnchor(bottom + 24, left, 'formula-embedded');
       if (anchor) showTextBubbleAtInsertion(anchor);
@@ -350,14 +474,13 @@ function showAiBubble(statusText: string, mode: 'ai' | 'voice' = 'ai'): void {
   if (ps) AiBubbleBridge.setPageHeight(ps.height);
   AiBubbleBridge.setActionButtons(_resolvedAiBubbleActions());
   AiBubbleBridge.show(statusText, mode);
-  // Re-push cached inbox previews: the native bubble is recreated on show
-  // and would otherwise come back without its capsule bars.
+  
+  
   if (_inboxItems.length > 0) AiBubbleBridge.setInboxItems(_inboxItems);
 }
 
-function _getBubbleStatusText(): string {
-  if (!_activeMode) return '';
-  const base = _activeMode === 'nospacing'
+function _noteBubbleStatus(mode: InsertMode): string {
+  const base = mode === 'nospacing'
     ? t('bubble_recv_nospacing')
     : t('bubble_recv_paragraph');
 
@@ -368,6 +491,11 @@ function _getBubbleStatusText(): string {
   const qLen = _textInserter?.getQueueLength() ?? 0;
   if (qLen > 0) return base + ` (${qLen})`;
   return base;
+}
+
+function _getBubbleStatusText(): string {
+  if (!_activeMode) return '';
+  return _noteBubbleStatus(_activeMode);
 }
 
 type InsertionAnchor = { top: number; left: number; safeMaxLeft: number };
@@ -391,48 +519,291 @@ function showTextBubbleAtInsertion(anchor: InsertionAnchor): void {
   console.log('[BackgroundService]: show bubble at insertion origin=', JSON.stringify(anchor));
 }
 
+
+function _isMosaicVisible(): boolean {
+  return FloatingToolbarBridge.isMosaicBoardVisible();
+}
+
+
+function _isMosaicBoard(): boolean {
+  return FloatingToolbarBridge.isMosaicBoardSurface();
+}
+
+function _mosaicBubbleStatus(): string {
+  return _mosaicTextBuffer.length > 0 ? t('bubble_mosaic_pending') : t('bubble_mosaic_ready');
+}
+
+
+function _mosaicBubbleOwned(): boolean {
+  return _isMosaicBoard() && (_mosaicTextActive || _mosaicTextBuffer.length > 0);
+}
+
+
+function _refreshMosaicBubble(): void {
+  if (!FloatingBubbleBridge.isAvailable) return;
+  if (_isMosaicBoard() && (_mosaicTextActive || _mosaicTextBuffer.length > 0)) {
+    FloatingBubbleBridge.setPending(_mosaicTextBuffer.length > 0);
+    FloatingBubbleBridge.show(_mosaicBubbleStatus(), 'nospacing');
+    return;
+  }
+  if (_activeMode) {
+    _syncTextBubblePending();
+    FloatingBubbleBridge.show(_getBubbleStatusText(), _activeMode);
+  } else {
+    FloatingBubbleBridge.setPending(false);
+    FloatingBubbleBridge.hide();
+  }
+}
+
+
+async function toggleMosaicTextMode(): Promise<boolean> {
+  if (_mosaicTextActive) {
+    stopMosaicTextMode();
+    return false;
+  }
+  
+  if (!await _ensureTextReceiverRuntime()) {
+    return false;
+  }
+  _mosaicTextActive = true;
+  _mosaicTextBuffer = [];
+  _pushActiveModes();
+  if (FloatingBubbleBridge.isAvailable) {
+    FloatingBubbleBridge.setPending(false);
+    FloatingBubbleBridge.show(_mosaicBubbleStatus(), 'nospacing');
+  }
+  FileLogger.logEvent('MosaicText', 'mode ON');
+  return true;
+}
+
+function stopMosaicTextMode(): void {
+  if (!_mosaicTextActive) return;
+  _mosaicTextActive = false;
+  _mosaicTextBuffer = [];
+  _pushActiveModes();
+  if (FloatingBubbleBridge.isAvailable) {
+    FloatingBubbleBridge.setPending(false);
+    FloatingBubbleBridge.hide();
+  }
+  FileLogger.logEvent('MosaicText', 'mode OFF');
+}
+
+
+function _mosaicTextEngaged(): boolean {
+  return _mosaicTextActive && _isMosaicBoard();
+}
+
+
+
+
+type HostContext = 'note' | 'doc' | 'mosaic' | 'mosaic_note';
+let _hostDocument = false;
+let _lastHostContext: HostContext | null = null;
+
+function _hostContext(): HostContext {
+  if (_isMosaicBoard()) return 'mosaic';
+  if (_isMosaicVisible()) return 'mosaic_note';
+  return _hostDocument ? 'doc' : 'note';
+}
+
+
+function _inDocument(): boolean {
+  return _hostContext() === 'doc';
+}
+
+function _syncHostContext(reason: string): void {
+  const next = _hostContext();
+  const prev = _lastHostContext;
+  _lastHostContext = next;
+  if (prev === next) return;
+  console.log('[BackgroundService]: host context', prev, '→', next, 'reason=', reason);
+  FileLogger.logEvent('HostContext', `${prev ?? 'init'}→${next} reason=${reason}`);
+  if (next === 'doc') _stopTextReceiveForDocument(reason);
+}
+
+function _stopTextReceiveForDocument(reason: string): void {
+  const inserterLive = (_textInserter?.isRunning() || _textInserter?.isPaused()) ?? false;
+  const hadText = _activeMode !== null || inserterLive || _mosaicTextActive
+    || _mosaicTextBuffer.length > 0 || _pendingCards.length > 0;
+  if (!hadText) return;
+  ++_switchVersion;
+  _mosaicTextActive = false;
+  _mosaicTextBuffer = [];
+  stopMode();
+  FileLogger.logEvent('DocTextReceiveStop', `reason=${reason} text=${hadText}`);
+  if (hadText) {
+    try { NativeUIUtils.showErrorTipDialog(t('doc_text_receive_stop')); } catch (_) {}
+  }
+}
+
+
+function _rejectDocInsert(kind: string): void {
+  FileLogger.logEvent('DocInsertRejected', kind);
+  if (!_aiActive || !AiBubbleBridge.isAvailable) return;
+  AiBubbleBridge.updateText(t('bubble_doc_insert_unsupported'));
+  setTimeout(() => {
+    if (!_aiWaiting && _aiActive && AiBubbleBridge.isAvailable) AiBubbleBridge.updateText(_aiReadyText());
+  }, 3000);
+}
+
+function _stampTextBubble(text: string, mode: string, create: boolean): void {
+  if (!FloatingBubbleBridge.isAvailable) return;
+  FloatingBubbleBridge.setPending(_mosaicTextActive && _mosaicTextBuffer.length > 0);
+  if (create) FloatingBubbleBridge.show(text, mode);
+  else FloatingBubbleBridge.remember(text, mode);
+}
+
+function _stampAiBubble(): void {
+  if (!_aiActive || !AiBubbleBridge.isAvailable) return;
+  const text = _aiWaiting ? t('bubble_ai_waiting') : _aiReadyText();
+  AiBubbleBridge.updateText(text);
+  AiBubbleBridge.setActionButtons(_resolvedAiBubbleActions());
+}
+
+type MosaicSurfaceEvent = { visible: boolean; surface?: string; noteRef?: string | null };
+
+
+function _adoptTextModeForSurface(event: MosaicSurfaceEvent): void {
+  const { visible } = event;
+  const surface = event.surface ?? (visible ? FloatingToolbarBridge.getMosaicSurface() : 'host');
+  const mosaicBoard = visible && surface === 'board';
+  if (mosaicBoard) {
+    if (_activeMode) {
+      _textInserter?.stop(true);
+      _activeMode = null;
+      _mosaicTextActive = true;
+      _pushActiveModes();
+      emitInsertMode(_lastMode);
+    }
+    if (_mosaicTextActive || _mosaicTextBuffer.length > 0) {
+      
+      
+      _stampTextBubble(_mosaicBubbleStatus(), 'nospacing', true);
+    }
+    _stampAiBubble();
+    FileLogger.logEvent('MosaicSurface', `enter surface=${surface} text=${_mosaicTextActive} ai=${_aiActive} pending=${_mosaicTextBuffer.length}`);
+    return;
+  }
+
+  if (_hostDocument) {
+    
+    _stampAiBubble();
+    FileLogger.logEvent('MosaicSurface', `leave surface=${surface} into document ai=${_aiActive}`);
+    return;
+  }
+
+  if (_mosaicTextActive) {
+    _mosaicTextActive = false;
+    _pushActiveModes();
+    const mode = _lastMode;
+    _stampTextBubble(_noteBubbleStatus(mode), mode, false);
+    switchToMode(mode).catch(e =>
+      console.warn('[BackgroundService]: mosaic→note text mode failed:', e));
+  } else if (_activeMode) {
+    _stampTextBubble(_getBubbleStatusText(), _activeMode, false);
+  } else if (_mosaicTextBuffer.length > 0 && FloatingBubbleBridge.isAvailable) {
+    FloatingBubbleBridge.hide();
+  }
+  _stampAiBubble();
+  FileLogger.logEvent('MosaicSurface', `leave surface=${surface} text=${_activeMode ?? 'off'} ai=${_aiActive}`);
+}
+
+
+function _stageMosaicText(text: string, source: TextSource): void {
+  const trimmed = text ?? '';
+  if (trimmed.length === 0) return;
+  _mosaicTextBuffer.push(trimmed);
+  console.log('[BackgroundService]: staged mosaic text, source=', source,
+    'pending=', _mosaicTextBuffer.length);
+  FileLogger.logEvent('MosaicText', `staged source=${source} pending=${_mosaicTextBuffer.length}`);
+  _refreshMosaicBubble();
+}
+
+
+function _flushMosaicTextCard(d: {
+  screenX: number; screenBottomY: number; bubbleWidth: number;
+}): void {
+  if (_mosaicTextBuffer.length === 0) return;
+  const text = _mosaicTextBuffer.join('\n\n');
+  _mosaicTextBuffer = [];
+  const anchorX = Math.round(d.screenX + (d.bubbleWidth ?? 0));
+  const anchorY = Math.round(d.screenBottomY);
+  FloatingToolbarBridge.requestMosaicTextCard(text, anchorX, anchorY);
+  console.log('[BackgroundService]: mosaic text card sent anchor=', anchorX, anchorY, 'len=', text.length);
+  FileLogger.logEvent('MosaicText', `flush anchor=(${anchorX},${anchorY}) len=${text.length}`);
+  _refreshMosaicBubble();
+}
+
 function _stagePendingCard(text: string, source: TextSource): void {
   _pendingCards.push({ text, source });
   console.log('[BackgroundService]: staged text card, source=', source, 'pending=', _pendingCards.length);
   FileLogger.logEvent('StageCard', `source=${source} pending=${_pendingCards.length}`);
-  if (FloatingBubbleBridge.isAvailable) {
-    FloatingBubbleBridge.setPending(true);
-  }
+  _syncTextBubblePending();
 }
 
-function _flushPendingCards(beforeDrain?: () => void): void {
-  if (_pendingCards.length === 0 || !_textInserter) {
+function _syncTextBubblePending(): void {
+  const pending = _pendingCards.length > 0
+    || (_textInserter?.isWaitingForPageTap() ?? false);
+  if (FloatingBubbleBridge.isAvailable) FloatingBubbleBridge.setPending(pending);
+}
+
+
+async function _flushPendingCards(beforeDrain?: () => void): Promise<void> {
+  if (!_textInserter) {
     beforeDrain?.();
     return;
   }
-  const cards = _pendingCards;
-  _pendingCards = [];
-  console.log('[BackgroundService]: bubble tap → inserting', cards.length, 'staged card(s)');
-  FileLogger.logEvent('FlushCards', `count=${cards.length}`);
   const inserter = _textInserter;
-  const drain = () => {
-    beforeDrain?.();
-    for (const c of cards) inserter.enqueue(c.text, c.source);
-  };
-  PluginCommAPI.getCurrentPageNum().then((pgRes: any) => {
+  try {
+    const pgRes: any = await PluginCommAPI.getCurrentPageNum();
     if (pgRes?.success && typeof pgRes.result === 'number'
         && pgRes.result !== inserter.getTargetPage()) {
       inserter.relocateTo(pgRes.result);
     }
-    drain();
-  }).catch(drain);
-  if (FloatingBubbleBridge.isAvailable) {
-    FloatingBubbleBridge.setPending(false);
+  } catch (e) {
+    console.warn('[BackgroundService]: bubble tap page lookup:', e);
   }
+
+  
+  beforeDrain?.();
+
+  const cards = _pendingCards;
+  _pendingCards = [];
+  if (cards.length > 0) {
+    console.log('[BackgroundService]: bubble tap → inserting', cards.length, 'staged card(s)');
+    FileLogger.logEvent('FlushCards', `count=${cards.length}`);
+    for (const c of cards) inserter.enqueue(c.text, c.source);
+  }
+
+  const continued = inserter.continueAfterPageTap();
+  if (continued) {
+    FileLogger.logEvent('ContinueAfterPageTap',
+      `page=${inserter.getTargetPage()} queueLen=${inserter.getQueueLength()}`);
+  }
+  _syncTextBubblePending();
 }
+
 
 function _clearPendingCards(): void {
   if (_pendingCards.length > 0) {
     console.log('[BackgroundService]: dropping', _pendingCards.length, 'staged card(s)');
     _pendingCards = [];
   }
-  if (FloatingBubbleBridge.isAvailable) FloatingBubbleBridge.setPending(false);
+  _syncTextBubblePending();
 }
+
+
+function _clearTextReceiveQueueFromBubble(): void {
+  const staged = _pendingCards.length;
+  const queued = _textInserter?.getQueueLength() ?? 0;
+  _pendingCards = [];
+  _textInserter?.clearQueue();
+  _syncTextBubblePending();
+  console.log('[BackgroundService]: bubble long press cleared text queue, staged=', staged,
+    'queued=', queued);
+  FileLogger.logEvent('ClearTextQueue', `staged=${staged} queued=${queued}`);
+}
+
 
 async function prefetchPageInfo(attempt = 0): Promise<void> {
   const MAX_ATTEMPTS = 6;
@@ -466,12 +837,30 @@ export function ensureInit(): void {
 
   prefetchPageInfo();
 
+  
+  
+  
   try { FloatingToolbarBridge.setActiveModes([]); } catch (_) {}
 
   loadLastMode().then(m => { _lastMode = m; });
 
   DeviceEventEmitter.addListener('onOpenTextReceiverRequested', () => {
-    console.log('[BackgroundService]: opening text receiver from LocalSend prompt, mode=', _lastMode);
+    console.log('[BackgroundService]: opening text receiver from LocalSend prompt, mode=', _lastMode,
+      'context=', _hostContext());
+    
+    if (_inDocument()) {
+      try { NativeUIUtils.showErrorTipDialog(t('doc_text_receive_unsupported')); } catch (_) {}
+      return;
+    }
+    if (_isMosaicBoard()) {
+      if (_mosaicTextActive) return;
+      toggleMosaicTextMode().then(ok => {
+        console.log('[BackgroundService]: LocalSend prompt mosaic text receiver result=', ok);
+      }).catch(error => {
+        console.warn('[BackgroundService]: failed to open mosaic text receiver from LocalSend prompt:', error);
+      });
+      return;
+    }
     startMode(_lastMode).then(ok => {
       console.log('[BackgroundService]: LocalSend prompt text receiver result=', ok);
     }).catch(error => {
@@ -480,8 +869,15 @@ export function ensureInit(): void {
   });
 
   if (AIRelayModule) {
-    // AIRelay is process-local and defaults OFF. Re-read native state after an
-    // RN reload without treating that reload as a request to start the service.
+    
+    try {
+      AIRelayModule.getAutoOpenDetail?.().then((v: boolean) => {
+        _autoOpenDetail = v === true;
+      }).catch(() => {});
+    } catch (_) {}
+
+    
+    
     try {
       AIRelayModule.isRelayEnabled?.().then((enabled: boolean) => {
         _relayEnabled = enabled === true;
@@ -492,7 +888,7 @@ export function ensureInit(): void {
       }).catch(() => {});
     } catch (_) {}
 
-    // Inbox updates are an internal Core listener, not a request to start it.
+    
     try { AIRelayModule.startInboxListening?.(); } catch (_) {}
 
     if (!_relayInboxSub) {
@@ -505,24 +901,46 @@ export function ensureInit(): void {
           console.warn('[BackgroundService]: bad inbox payload:', e);
           return;
         }
-        // Session filter: opening the AI bubble resets the capsules, so only
-        // messages that arrived during this session (or were explicitly
-        // re-added / pinned from the relay inbox grid) may show. The relay
-        // re-pushes its whole recent inbox on PLUGIN_ALIVE — without this
-        // filter the "cleared" capsules immediately refill with old records.
+        
+        const prevIds = new Set(_inboxItems.map(it => it.id));
+        const wasWaiting = _aiWaiting;
+
+        
+        
+        
+        
         _inboxItems = parsed.filter(it =>
-          it.pinned === true ||
-          (typeof it.time === 'number' && it.time >= _aiSessionStart));
+          !_dismissedCapsuleIds.has(it.id) &&
+          (it.pinned === true ||
+          (typeof it.time === 'number' && it.time >= _aiSessionStart)));
         console.log('[BackgroundService]: inbox from relay, items=', parsed.length,
           'afterSessionFilter=', _inboxItems.length);
         if (AiBubbleBridge.isAvailable) AiBubbleBridge.setInboxItems(_inboxItems);
 
-        // The reply no longer arrives as TEXT_TO_PLUGIN — a fresh llm item
-        // in the inbox is what "reply arrived" now looks like.
-        if (_aiWaiting && _inboxItems.length > 0 && _inboxItems[0].source === 'llm') {
+        
+        
+        
+        
+        if (_aiWaiting && _inboxItems.some(it => it.source === 'llm')) {
           clearAiTimeout();
           _aiWaiting = false;
           if (AiBubbleBridge.isAvailable) AiBubbleBridge.updateText(t('bubble_ai_reply_ready'));
+        }
+
+        
+        
+        if (_autoOpenDetail && wasWaiting && _aiActive) {
+          const newLlmItems = _inboxItems.filter(it =>
+            it.source === 'llm' && !prevIds.has(it.id) && !_autoOpenedIds.has(it.id));
+          if (newLlmItems.length > 0) {
+            const target = newLlmItems[newLlmItems.length - 1];
+            _autoOpenedIds.add(target.id);
+            _currentCapsuleDetailId = target.id;
+            _capsuleOpenCount[target.id] = (_capsuleOpenCount[target.id] || 0) + 1;
+            console.log('[BackgroundService]: auto-opening detail for', target.id);
+            AIRelayModule?.openRelayDetail?.('AIRelay', target.id)
+              .catch((e: any) => console.warn('[BackgroundService]: auto-open detail failed:', e));
+          }
         }
       });
     }
@@ -581,6 +999,7 @@ export function ensureInit(): void {
       const prevMode = _activeMode;
       _activeMode = null;
       clearAiTimeout();
+      
       _clearPendingCards();
       _pushActiveModes();
       emitInsertMode(null);
@@ -592,10 +1011,10 @@ export function ensureInit(): void {
         }
       }
 
-      if (reason === 'note_switched' && prevMode && _textInserter) {
+      if (reason === 'note_switched' && prevMode && _textInserter && !_inDocument()) {
         console.log('[BackgroundService]: note switched, restarting inserter mode=', prevMode);
         _textInserter.clearQueue();
-        _textInserter.start(prevMode).then(ok => {
+        _startTextInserter(_textInserter, prevMode).then(ok => {
           if (ok) {
             _activeMode = prevMode;
             _pushActiveModes();
@@ -613,6 +1032,11 @@ export function ensureInit(): void {
         setTimeout(() => FloatingBubbleBridge.hide(), 3500);
       }
     },
+    (waiting, queueLength) => {
+      console.log('[BackgroundService]: page continuation gate waiting=', waiting,
+        'queue=', queueLength);
+      _syncTextBubblePending();
+    },
   );
 
   reviveBridge();
@@ -622,7 +1046,10 @@ export function ensureInit(): void {
       console.log('[BackgroundService]: onTextReceived(LocalSend) len=', info.text.length);
       FileLogger.logTextReceived('LocalSend', info.text);
       if (info._pendingId) LocalSendBridge.ackPendingText(info._pendingId);
-      if (_activeMode) _stagePendingCard(info.text, 'localsend');
+      
+      if (_mosaicTextEngaged()) _stageMosaicText(info.text, 'localsend');
+      else if (_inDocument()) FileLogger.logEvent('DocInsertRejected', 'localsend');
+      else if (_activeMode) _stagePendingCard(info.text, 'localsend');
       else _textInserter?.enqueue(info.text, 'localsend');
     });
   }
@@ -634,12 +1061,15 @@ export function ensureInit(): void {
     _localSendStarted = false;
   });
 
+
   if (FloatingBubbleBridge.isAvailable) {
     const applyBubblePosition = (data: {
       pageY: number; pageX: number;
       pageBottomY: number; bubbleHeight: number;
       screenY: number; screenBottomY: number;
     }, source: 'user-drag' | 'user-tap' | 'initial-layout') => {
+      
+      if (_mosaicBubbleOwned()) return;
       const bottomY = (data.pageBottomY > data.pageY) ? data.pageBottomY : data.pageY;
       const insertTop = bottomY + 4;
       const anchor = _textInserter?.setNextInsertionAnchor(insertTop, data.pageX, source);
@@ -649,9 +1079,29 @@ export function ensureInit(): void {
     };
 
     FloatingBubbleBridge.onTap((d) => {
+      if (_mosaicBubbleOwned()) {
+        console.log('[BackgroundService]: mosaic text bubble tapped, pending=', _mosaicTextBuffer.length);
+        _flushMosaicTextCard(d);
+        return;
+      }
       console.log('[BackgroundService]: text bubble tapped, pending=', _pendingCards.length);
       _aiPositionLocked = false;
-      _flushPendingCards(() => applyBubblePosition(d, 'user-tap'));
+      _flushPendingCards(() => applyBubblePosition(d, 'user-tap')).catch(e =>
+        console.warn('[BackgroundService]: text bubble tap:', e));
+    });
+
+    FloatingBubbleBridge.onLongPress(() => {
+      if (_mosaicBubbleOwned()) {
+        if (_mosaicTextBuffer.length > 0) {
+          _mosaicTextBuffer = [];
+          FileLogger.logEvent('MosaicText', 'buffer cleared (long press)');
+          _refreshMosaicBubble();
+        }
+        return;
+      }
+      const armed = _pendingCards.length > 0
+        || (_textInserter?.isWaitingForPageTap() ?? false);
+      if (armed) _clearTextReceiveQueueFromBubble();
     });
 
     FloatingBubbleBridge.onDragEnd((d) => {
@@ -667,69 +1117,22 @@ export function ensureInit(): void {
     });
 
     if (AiBubbleBridge.isAvailable) {
-      if (!_aiLongPressSub) {
-        _aiLongPressSub = AiBubbleBridge.onLongPress(async () => {
-          if (!_aiActive) return;
-          if (!_relayEnabled) {
-            _showRelayDisabledHint();
-            return;
-          }
-          let hasLasso = false;
-          try {
-            const result = await PluginCommAPI.getLassoRect();
-            hasLasso = result?.success === true && result.result != null;
-          } catch (e) {
-            console.warn('[BackgroundService]: AI bubble long-press lasso check failed:', e);
-          }
-          if (hasLasso) {
-            handleAiSend().catch(e => console.error('[BackgroundService]: AI bubble long-press lasso send failed:', e));
-          } else {
-            handleScreenshotAi().catch(e => console.error('[BackgroundService]: AI bubble long-press screenshot failed:', e));
-          }
-        });
-      }
-
       AiBubbleBridge.onAction(({ actionId }) => {
         console.log('[BackgroundService]: AI bubble action:', actionId);
-        if ((actionId === 'lasso_ai' || actionId === 'screenshot_ai' || actionId === 'pen_lasso_ai')
-            && !_relayEnabled) {
+        if ((actionId === 'lasso_ai' || actionId === 'screenshot_ai') && !_relayEnabled) {
           _showRelayDisabledHint();
           return;
         }
-        // Co now only opens the relay inbox (communication is started by the
-        // collected ball tap, not this button).
+        
+        
         if (actionId === 'lasso_ai') {
-          handleAiSend().catch(e => console.error('[BackgroundService]: AI lasso_ai error:', e));
+          requestAiSelection(_aiSelectionMode)
+            .catch(e => console.error('[BackgroundService]: AI selection error:', e));
         } else if (actionId === 'screenshot_ai') {
-          handleScreenshotAi().catch(e => console.error('[BackgroundService]: AI screenshot_ai error:', e));
-        } else if (actionId === 'pen_lasso_ai') {
-          if (AiBubbleBridge.isAvailable) AiBubbleBridge.hide();
-          if (FloatingBubbleBridge.isAvailable) FloatingBubbleBridge.hide();
-
-          const bboxSub = FloatingToolbarBridge.onPenLassoBbox(() => {
-            bboxSub.remove();
-            cancelSub.remove();
-            setTimeout(() => {
-              restoreBubbleAfterLasso();
-              handleFormulaSend().catch(e => console.error('[BackgroundService]: pen_lasso_ai formula error:', e));
-            }, 300);
-          });
-          const cancelSub = FloatingToolbarBridge.onPenLassoCancel(() => {
-            bboxSub.remove();
-            cancelSub.remove();
-            setTimeout(() => restoreBubbleAfterLasso(), 300);
-          });
-
-          const { PenLasso } = require('./PenTools');
-          PenLasso.arm().catch((e: any) => {
-            console.error('[BackgroundService]: PenLasso.arm error:', e);
-            bboxSub.remove();
-            cancelSub.remove();
-            restoreBubbleAfterLasso();
-          });
+          handleScreenshotAi().catch(e => console.error('[BackgroundService]: AI screenshot error:', e));
         } else if (actionId === 'copilot') {
-          // Co opens the relay inbox. Starting communication is the collected
-          // ball tap's job; this button no longer toggles AIRelay off.
+          
+          
           if (!_relayEnabled) {
             _startAirRelayAndExpand().catch(e =>
               console.warn('[BackgroundService]: copilot start AIRelay failed:', e));
@@ -742,34 +1145,79 @@ export function ensureInit(): void {
         }
       });
 
-      // Collected single-button tap → start AIRelay and expand the full bubble.
-      AiBubbleBridge.onExpand(() => {
-        if (!_aiActive) return;
-        _startAirRelayAndExpand().catch(e =>
-          console.warn('[BackgroundService]: ball expand start AIRelay failed:', e));
+      
+      AiBubbleBridge.onActionMode(({ actionId, mode }) => {
+        if (actionId !== 'lasso_ai' || (mode !== 'text' && mode !== 'formula')) return;
+        _aiSelectionModeTouched = true;
+        _aiSelectionMode = mode;
+        saveAiSelectionMode(mode).catch(e => console.warn('[BackgroundService]: save AI mode:', e));
+        _syncRelayUi();
+        if (!_aiWaiting && !_aiSendInFlight && !_aiSelectionBusy) AiBubbleBridge.updateText(_aiReadyText());
       });
 
-      // Capsule tap → AIRelay's in-plugin detail panel.
       AiBubbleBridge.onCapsuleTap(({ id }) => {
+        _currentCapsuleDetailId = id;
+        _capsuleOpenCount[id] = (_capsuleOpenCount[id] || 0) + 1;
+        console.log('[BackgroundService]: capsule tap id=', id, 'openCount=', _capsuleOpenCount[id]);
         AIRelayModule?.openRelayDetail?.('AIRelay', id)
           .catch((e: any) => console.warn('[BackgroundService]: open AIRelay detail failed:', e));
       });
 
-      // Capsule long-press → insert directly, no detail page hop.
+      
+      
       AiBubbleBridge.onCapsuleLongPress(({ id }) => {
         try { AIRelayModule?.sendInsertRequest?.(id); } catch (_) {}
-        if (AiBubbleBridge.isAvailable) {
-          AiBubbleBridge.updateText(t('bubble_insert_sent'));
-          setTimeout(() => {
-            if (!_aiWaiting) AiBubbleBridge.updateText(_aiReadyText());
-          }, 2000);
+        console.log('[BackgroundService]: capsule long-press insert id=', id, 'aiWaiting=', _aiWaiting);
+        
+        if (AiBubbleBridge.isAvailable && !_aiWaiting) {
+          AiBubbleBridge.flashText(t('bubble_insert_sent'), 2000, _aiReadyText());
         }
       });
     }
 
     if (!_nativePanelCloseSub) {
-      _nativePanelCloseSub = FloatingToolbarBridge.onNativePanelClose(({ panel, cameFromBubble, screenshotBbox }) => {
-        console.log('[BackgroundService]: onNativePanelClose panel=', panel, 'fromBubble=', cameFromBubble);
+      _nativePanelCloseSub = FloatingToolbarBridge.onNativePanelClose(({
+        panel,
+        cameFromBubble,
+        restoreNoteBubbles,
+        screenshotBbox,
+        detailId,
+      }) => {
+        
+        
+        if (panel === 'lassoScreenshot') _aiScreenshotInFlight = false;
+        const shouldRestoreNoteBubbles = restoreNoteBubbles ?? cameFromBubble;
+        console.log('[BackgroundService]: onNativePanelClose panel=', panel,
+          'fromBubble=', cameFromBubble, 'restoreNoteBubbles=', shouldRestoreNoteBubbles);
+
+        
+        
+        
+        
+        
+        
+        if (panel === 'config' && AIRelayModule) {
+          try {
+            AIRelayModule.getAutoOpenDetail?.().then((v: boolean) => {
+              _autoOpenDetail = v === true;
+            }).catch(() => {});
+          } catch (_) {}
+        }
+
+        if (panel === 'airRelay') {
+          const closedId = detailId || _currentCapsuleDetailId;
+          if (closedId && _capsuleOpenCount[closedId]) {
+            const maxOpens = _autoOpenDetail ? 2 : 1;
+            if (_capsuleOpenCount[closedId] >= maxOpens) {
+              _dismissedCapsuleIds.add(closedId);
+              _inboxItems = _inboxItems.filter(it => it.id !== closedId);
+              if (AiBubbleBridge.isAvailable) AiBubbleBridge.setInboxItems(_inboxItems);
+              console.log('[BackgroundService]: capsule dismissed id=', closedId,
+                'opens=', _capsuleOpenCount[closedId], 'max=', maxOpens);
+            }
+          }
+          _currentCapsuleDetailId = null;
+        }
 
         const screenshotAnchor = screenshotBbox
           ? setProgrammaticInsertionAnchor(
@@ -778,7 +1226,7 @@ export function ensureInit(): void {
               `screenshot-${panel}`,
             )
           : null;
-        if (cameFromBubble) {
+        if (shouldRestoreNoteBubbles) {
           setTimeout(() => {
             if (screenshotAnchor) showTextBubbleAtInsertion(screenshotAnchor);
             restoreBubbleAfterLasso();
@@ -791,15 +1239,47 @@ export function ensureInit(): void {
       _noteForegroundSub = FloatingToolbarBridge.onNoteForegroundChanged(({ inNote }) => {
         console.log('[BackgroundService]: onNoteForegroundChanged inNote=', inNote);
         if (inNote) {
-          // The note app is re-loading its page right now; inserting a text
-          // box during that window can SIGSEGV its native redraw. Hold.
+          
+          
           _textInserter?.holdInserts(1500);
         }
       });
     }
+
+    if (!_mosaicSurfaceSub) {
+      _mosaicSurfaceSub = FloatingToolbarBridge.onMosaicBoardVisible((state) => {
+        const surface = state.surface ?? (state.visible ? FloatingToolbarBridge.getMosaicSurface() : 'host');
+        console.log('[BackgroundService]: onMosaicBoardVisible visible=', state.visible,
+          'surface=', surface, 'noteRef=', state.noteRef ?? null);
+        _adoptTextModeForSurface({ ...state, surface });
+        _syncHostContext(`mosaic surface=${state.visible ? surface : 'host'}`);
+      });
+    }
+
+    if (!_hostAppModeSub) {
+      _hostAppModeSub = FloatingToolbarBridge.onHostAppModeChanged(({ document, reason }) => {
+        _hostDocument = document === true;
+        _syncHostContext(`app mode: ${reason ?? ''}`);
+      });
+    }
+
+    
+    _hostDocument = FloatingToolbarBridge.isDocumentMode();
+    const mosaicVisible = FloatingToolbarBridge.isMosaicBoardVisible();
+    _adoptTextModeForSurface({
+      visible: mosaicVisible,
+      surface: mosaicVisible ? FloatingToolbarBridge.getMosaicSurface() : 'host',
+      noteRef: mosaicVisible ? FloatingToolbarBridge.getMosaicNoteRef() : null,
+    });
+    _syncHostContext('init');
   }
 
-  loadAiBubbleActions().then(ids => { _cachedAiBubbleActionIds = ids; });
+  Promise.all([loadAiBubbleActions(), loadAiSelectionMode()]).then(([ids, mode]) => {
+    _cachedAiBubbleActionIds = ids;
+    if (!_aiSelectionModeTouched) _aiSelectionMode = mode;
+    _syncRelayUi();
+    if (_aiActive && !_aiWaiting && !_aiSendInFlight) AiBubbleBridge.updateText(_aiReadyText());
+  }).catch(e => console.warn('[BackgroundService]: load AI preferences:', e));
 
   FileLogger.logEvent('BackgroundInit', 'ready');
 }
@@ -818,6 +1298,31 @@ export function isAiActive(): boolean {
 
 export async function toggleMode(target: InsertMode): Promise<InsertMode | null> {
   ensureInit();
+  try {
+    return await _toggleMode(target);
+  } finally {
+    
+    _pushActiveModes();
+  }
+}
+
+
+export function stopTextReceive(): void {
+  ensureInit();
+  ++_switchVersion;
+  stopMosaicTextMode();
+  stopMode();
+}
+
+async function _toggleMode(target: InsertMode): Promise<InsertMode | null> {
+  
+  if (_isMosaicBoard()) {
+    return (await toggleMosaicTextMode()) ? target : null;
+  }
+  if (_inDocument()) {
+    try { NativeUIUtils.showErrorTipDialog(t('doc_text_receive_unsupported')); } catch (_) {}
+    return null;
+  }
   if (!_textInserter) return null;
 
   const cur = _activeMode;
@@ -860,37 +1365,48 @@ export function stopMode(): void {
 
 export async function startAiReceiveMode(): Promise<void> {
   ensureInit();
-  // Every open starts from a clean slate: drop cached capsule previews,
-  // mark the session start (the inbox listener filters out anything older
-  // and not pinned), then ask the relay for pinned items via PLUGIN_ALIVE.
+  
+  try {
+    AIRelayModule?.getAutoOpenDetail?.().then((v: boolean) => {
+      _autoOpenDetail = v === true;
+    }).catch(() => {});
+  } catch (_) {}
+  
+  
+  
   _aiSessionStart = Date.now();
   _inboxItems = [];
+  _dismissedCapsuleIds = new Set();
+  _capsuleOpenCount = {};
+  _autoOpenedIds = new Set();
+  _currentCapsuleDetailId = null;
   if (AiBubbleBridge.isAvailable) AiBubbleBridge.setInboxItems([]);
   try { AIRelayModule?.sendAlive?.(); } catch (_) {}
-  if (_aiActive) {
-    // Already active: if AIRelay is enabled show the full bubble, otherwise
-    // drop back to the collected single-button form so a tap (re)starts it.
-    if (AiBubbleBridge.isAvailable) {
-      if (_relayEnabled) showAiBubble(_aiReadyText());
-      else AiBubbleBridge.showCollapsed(t('bubble_relay_off'));
-    }
-    return;
+  if (!_aiActive) {
+    _aiActive = true;
+    reviveBridge();
+    _pushActiveModes();
   }
-  _aiActive = true;
-  reviveBridge();
-  _pushActiveModes();
-  // Open as the collected single-button form; tapping it starts AIRelay and
-  // expands into the full bubble (replaces the dedicated Co on-switch).
-  if (AiBubbleBridge.isAvailable) AiBubbleBridge.showCollapsed(t('bubble_relay_off'));
+  await _startAirRelayAndExpand();
 }
 
 export function stopAiMode(): void {
+  ++_aiSelectionEpoch;
+  PenLasso.cancel();
+  _aiSelectionBusy = false;
+  _aiScreenshotInFlight = false;
   _aiActive = false;
   _aiWaiting = false;
   _aiPositionLocked = false;
-  // Hiding also resets: next open must not show this session's records.
+  
   _aiSessionStart = Date.now();
   _inboxItems = [];
+  _dismissedCapsuleIds = new Set();
+  _capsuleOpenCount = {};
+  _autoOpenedIds = new Set();
+  _currentCapsuleDetailId = null;
+  
+  
   try { AIRelayModule?.sendFormulaSessionReset?.(); } catch (_) {}
   if (AiBubbleBridge.isAvailable) AiBubbleBridge.setInboxItems([]);
   clearAiTimeout();
@@ -898,17 +1414,26 @@ export function stopAiMode(): void {
   try { AIRelayModule?.setRelayEnabled?.(false).catch(() => {}); } catch (_) {}
   teardownBridge();
   AiBubbleBridge.hide();
+  
+  stopMode();
   _pushActiveModes();
 }
 
 export function stopAllModes(): void {
-  stopMode();
-  stopAiMode();
+  stopAiMode(); 
 }
 
 export async function switchToMode(mode: InsertMode): Promise<boolean> {
   ensureInit();
   if (!_textInserter) return false;
+  if (_inDocument()) {
+    FileLogger.logEvent('SwitchModeRejected', `mode=${mode} in document`);
+    return false;
+  }
+  if (!await _ensureTextReceiverRuntime()) {
+    stopMode();
+    return false;
+  }
 
   const myVersion = ++_switchVersion;
   const previousMode = _lastMode;
@@ -974,7 +1499,68 @@ export async function switchToMode(mode: InsertMode): Promise<boolean> {
   return ok;
 }
 
-export async function handleAiSend(): Promise<void> {
+
+export async function requestAiSelection(mode: AiSelectionMode = _aiSelectionMode): Promise<void> {
+  ensureInit();
+  if (!_relayEnabled) { _showRelayDisabledHint(); return; }
+  if (_aiSelectionBusy || _aiScreenshotInFlight || _aiSendInFlight || _aiWaiting) {
+      if (AiBubbleBridge.isAvailable) {
+      AiBubbleBridge.updateText(_aiWaiting ? t('bubble_ai_sending') : t('bubble_ai_recognizing'));
+    }
+    return;
+  }
+  _aiSelectionBusy = true;
+  const epoch = ++_aiSelectionEpoch;
+  let hidden = false;
+  const canContinue = () => _aiSelectionEpoch === epoch && _relayEnabled;
+  try {
+    if (mode === 'formula' && _inDocument()) {
+      AiBubbleBridge.updateText(t('bubble_doc_formula_unsupported'));
+      return;
+    }
+    if (_isMosaicBoard()) {
+      
+      if (mode === 'text') await handleAiSend({ canContinue, fresh: true });
+      else AiBubbleBridge.updateText(t('ai_selection_retry'));
+      return;
+    }
+    const page = await readSelectionPage();
+    if (!canContinue()) return;
+    if (!page) { AiBubbleBridge.updateText(t('ai_selection_retry')); return; }
+    const selected = await hasSelectedContent();
+    const request: AiSelectionRequest = { expectedPage: page, canContinue, fresh: true };
+    if (!await selectionRequestIsCurrent(request)) return;
+    if (!selected) {
+      hidden = true;
+      AiBubbleBridge.hide();
+      FloatingBubbleBridge.hide();
+      PaletteBubbleBridge.hideTemporarily();
+      const result = await PenLasso.arm({ page });
+      if (!canContinue()) return;
+      restoreBubbleAfterLasso();
+      hidden = false;
+      if (result.status !== 'selected') {
+        if (result.status !== 'cancelled') AiBubbleBridge.updateText(t('ai_selection_retry'));
+        return;
+      }
+    }
+    if (!await selectionRequestIsCurrent(request)) return;
+    const ready = await hasSelectedContent();
+    if (!ready || !await selectionRequestIsCurrent(request)) return;
+    if (mode === 'formula') await handleFormulaSend(request);
+    else await handleAiSend(request);
+  } catch (e) {
+    FileLogger.logEvent('AiSelection', `request=${epoch} ${String(e)}`);
+    if (canContinue()) AiBubbleBridge.updateText(t('ai_selection_retry'));
+  } finally {
+    if (_aiSelectionEpoch === epoch) {
+      _aiSelectionBusy = false;
+      if (hidden) restoreBubbleAfterLasso();
+        }
+  }
+}
+
+export async function handleAiSend(request?: AiSelectionRequest): Promise<void> {
   ensureInit();
 
   if (_aiSendInFlight) {
@@ -1007,11 +1593,20 @@ export async function handleAiSend(): Promise<void> {
   };
 
   try {
-
-    let extracted = await LassoExtractor.consumeWarmed(onProgress);
-    if (!extracted) {
-      extracted = await LassoExtractor.extract(onProgress);
+    if (!await selectionRequestIsCurrent(request)) return;
+    let extracted: any;
+    const mosaicBoard = _isMosaicBoard();
+    if (mosaicBoard) {
+      
+      
+      const { extractMosaicLassoText } = require('./ToolActions');
+      const mosaicText = await extractMosaicLassoText(onProgress);
+      extracted = { text: mosaicText ?? '', imagePaths: [], linkedFiles: [], lassoRect: null };
+    } else {
+      const warmed = request?.fresh ? null : await LassoExtractor.consumeWarmed(onProgress);
+      extracted = warmed ?? await LassoExtractor.extract(onProgress);
     }
+    if (!await selectionRequestIsCurrent(request)) return;
     if (!extracted.text) {
       FileLogger.logEvent('AiSendAbort', 'no text');
 
@@ -1040,19 +1635,30 @@ export async function handleAiSend(): Promise<void> {
 
     reviveBridge();
 
-    try {
-      await Promise.race([
-        (PluginCommAPI.setLassoBoxState as any)(2),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('setLassoBoxState timeout')), 3000)),
-      ]);
-      console.log('[BackgroundService]: lasso selection cleared');
-    } catch (e) {
-      console.warn('[BackgroundService]: setLassoBoxState failed (non-fatal):', e);
+    
+    if (mosaicBoard) {
+      const { clearMosaicLassoSelection } = require('./ToolActions');
+      clearMosaicLassoSelection();
+    } else {
+      try {
+        await Promise.race([
+          (PluginCommAPI.setLassoBoxState as any)(2),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('setLassoBoxState timeout')), 3000)),
+        ]);
+        console.log('[BackgroundService]: lasso selection cleared');
+      } catch (e) {
+        console.warn('[BackgroundService]: setLassoBoxState failed (non-fatal):', e);
+      }
     }
 
     const anchorRect = extracted.lassoRect ?? extracted.lastTextBoxRect;
 
-    if (_textInserter && _textInserter.isRunning()) {
+    
+    
+    
+    
+    const insertIntoPage = !mosaicBoard && !_inDocument();
+    if (insertIntoPage && _textInserter && _textInserter.isRunning()) {
       try {
         const pgRes: any = await PluginCommAPI.getCurrentPageNum();
         if (pgRes?.success && typeof pgRes.result === 'number'
@@ -1066,12 +1672,12 @@ export async function handleAiSend(): Promise<void> {
       }
     }
 
-    if (_textInserter) {
+    if (insertIntoPage && _textInserter) {
       let insertionAnchor: InsertionAnchor | null = null;
       let startedHere = false;
 
       if (_textInserter.isPaused()) {
-        // Set the anchor before resume(): resume may immediately schedule queued text.
+        
         if (anchorRect) {
           insertionAnchor = setProgrammaticInsertionAnchor(
             anchorRect.bottom + AI_REPLY_GAP_PX,
@@ -1082,7 +1688,7 @@ export async function handleAiSend(): Promise<void> {
         _textInserter.resume();
       } else if (!_textInserter.isRunning()) {
         _textInserter.clearQueue();
-        const ok = await _textInserter.start('nospacing');
+        const ok = await _startTextInserter(_textInserter, 'nospacing');
         if (ok) {
           startedHere = true;
           _activeMode = 'nospacing';
@@ -1119,12 +1725,13 @@ export async function handleAiSend(): Promise<void> {
 
     try { AIRelayModule.sendAlive?.(); } catch (_) {}
 
-    // Ask native what actually happened. Without a paired phone the query is
-    // dropped, and entering the waiting state for that case leaves the user
-    // watching for a reply that can never arrive — and, because _aiWaiting
-    // also gates handleAiSend, blocks every retry for the next 90s.
+    
+    
+    
+    
     let sendResult = 'sent';
     try {
+      if (!await selectionRequestIsCurrent(request)) return;
       if (AIRelayModule.sendQueryWithResult) {
         sendResult = await AIRelayModule.sendQueryWithResult(extracted.text);
       } else {
@@ -1137,9 +1744,9 @@ export async function handleAiSend(): Promise<void> {
     }
 
     if (sendResult === 'disabled' || sendResult === 'no_endpoint' || sendResult === 'failed') {
-      // Nothing is in flight, so don't arm _aiWaiting or the timeout. Still
-      // stamp the send time: it drives the 3s debounce, without which an
-      // impatient retry re-runs the whole lasso extraction immediately.
+      
+      
+      
       _lastAiSendAt = Date.now();
       const msg = sendResult === 'disabled'
         ? t('bubble_relay_disabled')
@@ -1162,8 +1769,8 @@ export async function handleAiSend(): Promise<void> {
     _lastAiSendAt = Date.now();
     _lastAiSendText = extracted.text;
     if (AiBubbleBridge.isAvailable) {
-      // "queued" still resolves through the same reply path once the phone
-      // reconnects, so it keeps the waiting state — just says so honestly.
+      
+      
       AiBubbleBridge.updateText(
         sendResult === 'queued' ? t('bubble_ai_queued') : t('bubble_ai_waiting'),
       );
@@ -1198,7 +1805,8 @@ export async function handleAiSend(): Promise<void> {
   }
 }
 
-export async function handleFormulaSend(): Promise<void> {
+
+export async function handleFormulaSend(request?: AiSelectionRequest): Promise<void> {
   ensureInit();
 
   if (_aiSendInFlight) {
@@ -1216,7 +1824,8 @@ export async function handleFormulaSend(): Promise<void> {
 
   try {
     if (AiBubbleBridge.isAvailable) AiBubbleBridge.updateText(t('bubble_ai_sending'));
-    const res = await sendFormulaQuery();
+    if (!await selectionRequestIsCurrent(request)) return;
+    const res = await sendFormulaQuery(request);
     if (res === 'ok') {
       _aiWaiting = true;
       _lastAiSendAt = Date.now();
@@ -1238,6 +1847,7 @@ export async function handleFormulaSend(): Promise<void> {
       if (AiBubbleBridge.isAvailable) AiBubbleBridge.updateText(t('bubble_ai_no_lasso'));
       revertBubbleSoon();
     } else if (res === 'no-relay') {
+      
       try { NativeUIUtils.showErrorTipDialog(t('formula_no_relay')); } catch (_) {}
       if (AiBubbleBridge.isAvailable) AiBubbleBridge.updateText(_aiReadyText());
     } else {
@@ -1252,11 +1862,12 @@ export async function handleFormulaSend(): Promise<void> {
   }
 }
 
-export async function startLocalSend(): Promise<boolean> {
+async function _startLocalSendOnce(gen: number): Promise<boolean> {
   if (_localSendStarted) return true;
   try {
     const status = await LocalSendBridge.getServerStatus();
     if (status?.running) {
+      if (gen !== _localSendGen) return false;
       _localSendStarted = true;
       return true;
     }
@@ -1271,14 +1882,18 @@ export async function startLocalSend(): Promise<boolean> {
       NativeUIUtils.showErrorTipDialog(t('perm_required'));
       return false;
     }
+    if (gen !== _localSendGen) return false;
     try {
       await LocalSendBridge.startServer({
         alias: 'Supernote', port: 53317,
         dest: '/sdcard/INBOX', pin: '',
       });
+      if (gen !== _localSendGen) {
+        try { await LocalSendBridge.stopServer(); } catch (_) {}
+        return false;
+      }
       _localSendStarted = true;
       console.log('[BackgroundService]: LocalSend server started');
-      LocalSendBridge.scanForPeers().catch(() => {});
       return true;
     } catch (startErr) {
       console.warn('[BackgroundService]: startLocalSend: LocalSend start failed:', startErr);
@@ -1291,9 +1906,31 @@ export async function startLocalSend(): Promise<boolean> {
   }
 }
 
+export async function startLocalSend(showNetworkTip = true): Promise<boolean> {
+  const gen = _localSendGen;
+  const wifi = await LocalSendBridge.isWifiConnected().catch(() => false);
+  if (gen !== _localSendGen) return false;
+  if (!wifi) {
+    _localSendStarted = false;
+    if (showNetworkTip) NativeUIUtils.showErrorTipDialog(t('no_wifi'));
+    return false;
+  }
+  if (_localSendStarted) return true;
+  if (_localSendStartPromise) return _localSendStartPromise;
+  const attempt = _startLocalSendOnce(gen);
+  _localSendStartPromise = attempt;
+  try {
+    return await attempt;
+  } finally {
+    if (_localSendStartPromise === attempt) _localSendStartPromise = null;
+  }
+}
+
 export async function stopLocalSend(): Promise<void> {
-  try { await LocalSendBridge.stopServer(); } catch (_) {}
+  _localSendGen += 1;
   _localSendStarted = false;
+  _localSendStartPromise = null;
+  try { await LocalSendBridge.stopServer(); } catch (_) {}
   console.log('[BackgroundService]: LocalSend server stopped');
 }
 
@@ -1310,7 +1947,9 @@ export async function flushPendingTexts(): Promise<number> {
       for (const info of localSendTexts) {
         FileLogger.logTextReceived('LocalSend', info.text);
         if (info._pendingId) LocalSendBridge.ackPendingText(info._pendingId);
-        if (_activeMode) _stagePendingCard(info.text, 'localsend');
+        if (_mosaicTextEngaged()) _stageMosaicText(info.text, 'localsend');
+        else if (_inDocument()) FileLogger.logEvent('DocInsertRejected', 'localsend');
+        else if (_activeMode) _stagePendingCard(info.text, 'localsend');
         else _textInserter.enqueue(info.text, 'localsend');
       }
       FileLogger.logEvent('FlushPendingLocalSend', `count=${localSendTexts.length}`);
@@ -1326,11 +1965,11 @@ export async function flushPendingTexts(): Promise<number> {
 export async function reviveIfNeeded(): Promise<void> {
 
   reviveBridge();
-  if (!_textInserter || !_activeMode) return;
+  if (!_textInserter || !_activeMode || _inDocument()) return;
   if (!_textInserter.hasLiveTimers()) {
     const mode = _activeMode;
     _textInserter.clearQueue();
-    const ok = await _textInserter.start(mode, true);
+    const ok = await _startTextInserter(_textInserter, mode, true);
     if (ok) {
       _pushActiveModes();
       emitInsertMode(_activeMode);
@@ -1343,7 +1982,11 @@ export async function reviveIfNeeded(): Promise<void> {
 }
 
 export async function handleScreenshotAi(): Promise<void> {
-  console.log('[BackgroundService] handleScreenshotAi START (native path)');
+  ensureInit();
+  if (!_relayEnabled) { _showRelayDisabledHint(); return; }
+  if (_aiSelectionBusy || _aiSendInFlight || _aiWaiting || _aiScreenshotInFlight) return;
+  _aiScreenshotInFlight = true;
+  console.log('[BackgroundService] handleScreenshotAi START (live page path)');
 
   FloatingToolbarBridge.showLassoScreenshotPanelFromBubble();
   FileLogger.logEvent('ScreenshotAi', 'native panel invoked');
@@ -1351,11 +1994,14 @@ export async function handleScreenshotAi(): Promise<void> {
 
 export async function handleScreenshotSend(): Promise<void> {
   console.log('[BackgroundService] handleScreenshotSend START (native path)');
-  FloatingToolbarBridge.showLassoScreenshotPanelForSendFromBubble();
+  
+  
+  FloatingToolbarBridge.showSmartLassoCapture();
   FileLogger.logEvent('ScreenshotSend', 'native panel invoked');
 }
 
 export function restoreBubbleAfterLasso(): void {
+  PaletteBubbleBridge.restore();
   if (_activeMode && FloatingBubbleBridge.isAvailable) {
     FloatingBubbleBridge.show(_getBubbleStatusText(), _activeMode);
   }

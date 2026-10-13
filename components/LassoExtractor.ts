@@ -150,10 +150,10 @@ export class LassoExtractor {
     if (unrecognizedStrokes.length > 0) {
       try { onProgress?.('recognizing'); } catch (_) {}
       try {
-        // recognizeElements makes the host write a trails temp file to
-        // /sdcard/.data/plugin/ — without the FILE:WRITE grant it throws a
-        // SecurityException that tears down the whole React instance. Same
-        // check-and-prompt pattern as the LocalSend server startup.
+        
+        
+        
+        
         const canWrite = await FloatingToolbarBridge.requestFileWritePermission();
         if (!canWrite) {
           FileLogger.logEvent('LassoExtract', 'recognizeElements skipped: no FILE:WRITE permission');

@@ -10,10 +10,7 @@ export interface SafeInsertionGeometry {
   minTextboxWidth: number;
 }
 
-/**
- * Constrain an explicit insertion column without changing the normal default
- * left margin. The native layout engine mirrors this formula as a final guard.
- */
+
 export function normalizeInsertionLeft(
   pageWidth: number,
   requestedLeft: number,

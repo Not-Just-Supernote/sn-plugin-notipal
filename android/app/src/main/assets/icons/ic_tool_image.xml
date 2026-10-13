@@ -1,18 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!--
-  Inkling toolbar icon pack
-  24×24 viewport, stroke 1.5dp, monochrome (tint via app:tint or TextView textColor)
--->
+
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="24dp" android:height="24dp"
-    android:viewportWidth="24" android:viewportHeight="24"
-    android:tint="?android:attr/textColorPrimary">
-  <path android:strokeColor="#1A1A1A" android:strokeWidth="1.5" android:fillColor="#00000000"
+    android:viewportWidth="24" android:viewportHeight="24">
+  <path android:strokeColor="#1A1A1A" android:strokeWidth="2" android:fillColor="#00000000"
         android:strokeLineCap="round" android:strokeLineJoin="round"
-        android:pathData="M3,5.5 L3,18.5 A1.5,1.5 0 0 0 4.5,20 L19.5,20 A1.5,1.5 0 0 0 21,18.5 L21,5.5 A1.5,1.5 0 0 0 19.5,4 L4.5,4 A1.5,1.5 0 0 0 3,5.5 Z"/>
+        android:pathData="M4.74 4.54 L16.6 2.67 A1.5 1.5 0 0 1 18.31 3.91 L20.5 17.74 A1.5 1.5 0 0 1 19.26 19.46 L7.4 21.33 A1.5 1.5 0 0 1 5.69 20.09 L3.5 6.26 A1.5 1.5 0 0 1 4.74 4.54 Z"/>
+  <path android:strokeColor="#1A1A1A" android:strokeWidth="2" android:fillColor="#00000000"
+        android:strokeLineCap="round" android:strokeLineJoin="round"
+        android:pathData="M6.12 6.86 L16 5.29 L17.33 13.69 L7.45 15.25 Z"/>
   <path android:fillColor="#1A1A1A"
-        android:pathData="M8.5,8 A1.5,1.5 0 1 1 8.5,11 A1.5,1.5 0 1 1 8.5,8 Z"/>
-  <path android:strokeColor="#1A1A1A" android:strokeWidth="1.5" android:fillColor="#00000000"
-        android:strokeLineCap="round" android:strokeLineJoin="round"
-        android:pathData="M3,17 L8,12 L12,16 L15,13 L21,19"/>
+        android:pathData="M7.45 15.25 L9.9 11.52 L11.96 13.02 L13.96 9.06 L17.33 13.69 Z"/>
+  <path android:fillColor="#1A1A1A"
+        android:pathData="M7.67 8.85 A1.2 1.2 0 1 1 10.07 8.85 A1.2 1.2 0 1 1 7.67 8.85 Z"/>
 </vector>

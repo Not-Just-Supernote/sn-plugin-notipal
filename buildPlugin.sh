@@ -1,14 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ============================================================
-# buildPlugin.sh -- Analyze Android Dependencies and Generate PluginConfig.json
-# Bash equivalent of buildPlugin.ps1
-# ============================================================
 
 PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd)"
 
-# ---------- Color helpers ----------
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
@@ -26,13 +21,11 @@ print_color() {
     esac
 }
 
-# ---------- Generate 16-char random string ----------
 new_random_string() {
     local len="${1:-16}"
     cat /dev/urandom | tr -dc 'a-z0-9' | head -c "$len"
 }
 
-# ---------- Read package.json ----------
 get_package_info() {
     local pkg_json="$PROJECT_ROOT/package.json"
     if [[ ! -f "$pkg_json" ]]; then
@@ -46,7 +39,6 @@ get_package_info() {
     PKG_VERSION=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('version','0.0.1'))" "$pkg_json" 2>/dev/null) || PKG_VERSION="0.0.1"
 }
 
-# ---------- Create PluginConfig.json ----------
 new_plugin_config() {
     local plugin_id="$1"
     local config_file="$PROJECT_ROOT/PluginConfig.json"
@@ -69,7 +61,6 @@ with open(sys.argv[5], 'w', encoding='utf-8') as f:
     print_color "PluginConfig.json file created: $config_file" Green
 }
 
-# ---------- Advance plugin version before packaging ----------
 increment_plugin_version() {
     local config_file="$1"
     local result
@@ -113,7 +104,6 @@ PY
     print_color "Plugin version advanced: $old_name -> $new_name, code $old_code -> $new_code" Green
 }
 
-# ---------- Check if module name should be ignored ----------
 is_ignored_module() {
     local name="$1"
     local lower
@@ -126,7 +116,6 @@ is_ignored_module() {
     return 1
 }
 
-# ---------- Find ReactPackage implementations in a directory ----------
 FOUND_PACKAGES=()
 
 find_packages_in_directory() {
@@ -176,7 +165,6 @@ find_packages_in_directory() {
     done
 }
 
-# ---------- Find manually added packages from Application classes ----------
 find_manual_react_packages_from_application() {
     local dirs_to_scan=(
         "$PROJECT_ROOT/android/app/src/main/java"
@@ -190,13 +178,11 @@ find_manual_react_packages_from_application() {
         while IFS= read -r -d '' f; do
             local text
             text=$(<"$f") || continue
-            # Strip comments
             text=$(echo "$text" | sed 's|//.*$||g' | perl -0pe 's|/\*.*?\*/||gs')
 
             local pkg_name
             pkg_name=$(echo "$text" | grep -oP '^\s*package\s+\K[^\s;]+' | head -1 | tr -d ' ' || true)
 
-            # Build import map
             unset _imports 2>/dev/null || true
             declare -A _imports=()
             while IFS= read -r line; do
@@ -216,7 +202,6 @@ find_manual_react_packages_from_application() {
                 echo "$name"
             }
 
-            # Kotlin: add(ClassName())
             while IFS= read -r match; do
                 [[ -z "$match" ]] && continue
                 local fqcn
@@ -224,7 +209,6 @@ find_manual_react_packages_from_application() {
                 [[ "$fqcn" == *Package ]] && found+=("$fqcn")
             done < <(echo "$text" | grep -oP '\badd\(\s*\K[A-Za-z0-9_.]+(?=\s*\()' 2>/dev/null || true)
 
-            # Java: add(new ClassName())
             while IFS= read -r match; do
                 [[ -z "$match" ]] && continue
                 local fqcn
@@ -236,8 +220,7 @@ find_manual_react_packages_from_application() {
         done < <(find "$dir" -type f \( -name '*.java' -o -name '*.kt' \) -print0 2>/dev/null)
     done
 
-    # Deduplicate
-    if [[ ${#found[@]} -gt 0 ]]; then
+    if [[ ${
         mapfile -t APPLICATION_PACKAGES < <(printf '%s\n' "${found[@]}" | sort -u)
     else
         APPLICATION_PACKAGES=()
@@ -248,7 +231,6 @@ find_manual_react_packages_from_application() {
     done
 }
 
-# ---------- Scan node_modules for native code ----------
 scan_node_modules_native_code() {
     local node_modules="$PROJECT_ROOT/node_modules"
     NATIVE_MODS=()
@@ -297,7 +279,6 @@ scan_node_modules_native_code() {
     print_color "Third-party dependencies with Android sources: ${#NATIVE_MODS[@]}" Blue
 }
 
-# ---------- Parse autolinking PackageList.java ----------
 get_react_packages_from_autolinking_source() {
     local src_file="$PROJECT_ROOT/android/app/build/generated/autolinking/src/main/java/com/facebook/react/PackageList.java"
     AUTOLINKING_PACKAGES=()
@@ -309,7 +290,6 @@ get_react_packages_from_autolinking_source() {
     local text
     text=$(<"$src_file")
 
-    # Build import map
     declare -A al_imports=()
     while IFS= read -r line; do
         local fq short
@@ -320,7 +300,6 @@ get_react_packages_from_autolinking_source() {
         fi
     done <<< "$text"
 
-    # Extract new ClassName()
     while IFS= read -r name; do
         [[ -z "$name" ]] && continue
         local fqcn="$name"
@@ -330,14 +309,12 @@ get_react_packages_from_autolinking_source() {
         [[ "$fqcn" == *Package ]] && AUTOLINKING_PACKAGES+=("$fqcn")
     done < <(echo "$text" | grep -oP 'new\s+\K[A-Za-z0-9_.]+(?=\s*\()' 2>/dev/null || true)
 
-    # Deduplicate
-    if [[ ${#AUTOLINKING_PACKAGES[@]} -gt 0 ]]; then
+    if [[ ${
         mapfile -t AUTOLINKING_PACKAGES < <(printf '%s\n' "${AUTOLINKING_PACKAGES[@]}" | sort -u)
     fi
 
     print_color "Packages extracted from autolinking source: ${#AUTOLINKING_PACKAGES[@]}" Blue
 
-    # Filter excluded packages
     local exclude=("com.facebook.react.shell.MainReactPackage" "com.ratta.supernote.pluginlib.PluginPackage")
     local filtered=()
     for pkg in "${AUTOLINKING_PACKAGES[@]}"; do
@@ -356,13 +333,12 @@ get_react_packages_from_autolinking_source() {
     unset al_imports
 }
 
-# ---------- Update reactPackages in build/generated PluginConfig.json ----------
 update_plugin_config_packages() {
     local build_config="$1"
     shift
     local packages=("$@")
 
-    if [[ ${#packages[@]} -eq 0 ]]; then
+    if [[ ${
         print_color "No ReactPackage implementations found, skipping PluginConfig.json update" Yellow
         return
     fi
@@ -380,8 +356,11 @@ update_plugin_config_packages() {
 
     print_color "Updating reactPackages field in build/generated PluginConfig.json..." Blue
 
-    # Always prepend InklingPackages
-    local all_pkgs=("com.supernote_quicktoolbar.InklingPackages" "${packages[@]}")
+    local all_pkgs=("me.laumss.notipal.InklingPackages" "${packages[@]}")
+    local unique_pkgs=()
+    if [[ ${
+        mapfile -t unique_pkgs < <(printf '%s\n' "${all_pkgs[@]}" | awk 'NF && !seen[$0]++')
+    fi
 
     python3 -c "
 import json, sys
@@ -392,15 +371,37 @@ with open(config_path, 'r', encoding='utf-8') as f:
 config['reactPackages'] = pkgs
 with open(config_path, 'w', encoding='utf-8') as f:
     json.dump(config, f, indent=4, ensure_ascii=False)
-" "$build_config" "${all_pkgs[@]}"
+" "$build_config" "${unique_pkgs[@]}"
 
     print_color "PluginConfig.json in build/generated folder updated with reactPackages field" Green
 }
 
-# ---------- React Native bundle ----------
+remove_native_code_package_reference() {
+    local build_config="$1"
+    [[ ! -f "$build_config" ]] && return 0
+    python3 - "$build_config" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, 'r', encoding='utf-8') as f:
+    config = json.load(f)
+if 'nativeCodePackage' in config:
+    del config['nativeCodePackage']
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(config, f, indent=4, ensure_ascii=False)
+PY
+}
+
 build_react_native_bundle() {
     local output_dir="$1"
     local bundle_output="$output_dir/${PKG_NAME}.bundle"
+
+    print_color "Copying mathjax from node_modules..." Blue
+    if ! (cd "$PROJECT_ROOT" && npm run copy-mathjax); then
+        print_color "MathJax asset preparation failed; cannot continue bundling" Red
+        return 1
+    fi
 
     print_color "Starting React Native bundling..." Blue
     print_color "Executing: npx react-native bundle ..." Yellow
@@ -422,7 +423,6 @@ build_react_native_bundle() {
     fi
 }
 
-# ---------- Gradle APK build ----------
 build_android_apk() {
     local require_check="${1:-false}"
     local build_config="$BUILD_GENERATED_DIR/PluginConfig.json"
@@ -442,9 +442,6 @@ build_android_apk() {
         return 1
     fi
 
-    # Always assemble Debug: :sn-plugin-lib:parseReleaseLocalResources fails
-    # with !directory.isDirectory(). Non-WithLogs still strips debug tools via
-    # -PinklingEnableDebug=false -> BuildConfig.ENABLE_DEBUG=false.
     local task="buildCustomApkDebug"
     local debug_prop="-PinklingEnableDebug=false"
     if [[ "${WITH_LOGS:-}" == "1" ]]; then
@@ -476,12 +473,10 @@ build_android_apk() {
     fi
 }
 
-# ---------- Copy APK and update nativeCodePackage ----------
 copy_apk_and_update_config() {
     local apk_search="$PROJECT_ROOT/android/app/build/outputs/apk"
     local apk_path=""
 
-    # Prefer custom APK
     apk_path=$(find "$apk_search" -name '*custom*.apk' -type f 2>/dev/null | head -1)
     if [[ -z "$apk_path" ]]; then
         apk_path=$(find "$apk_search" -name '*.apk' -type f 2>/dev/null | head -1)
@@ -523,7 +518,6 @@ with open(p, 'w', encoding='utf-8') as f:
     return 0
 }
 
-# ---------- Copy icon and update iconPath ----------
 copy_icon_and_update_path() {
     local build_config="$BUILD_GENERATED_DIR/PluginConfig.json"
     print_color "Checking and copying icon file..." Blue
@@ -568,7 +562,6 @@ with open(p, 'w', encoding='utf-8') as f:
     fi
 }
 
-# ---------- Create zip and rename to .snplg ----------
 create_snplg_package() {
     local source_dir="$1"
     local output_dir="$2"
@@ -584,7 +577,6 @@ create_snplg_package() {
     local temp_zip="$output_dir/temp_package.zip"
     local snplg_file="$output_dir/${project_name}.snplg"
 
-    # Remove old files if they exist
     rm -f "$temp_zip" "$snplg_file"
 
     print_color "Starting to package build/generated directory..." Blue
@@ -613,27 +605,23 @@ with zipfile.ZipFile(dst, 'w', zipfile.ZIP_DEFLATED) as zf:
     return 0
 }
 
-# ============================================================
-# Main
-# ============================================================
 main() {
-    # Parse CLI args: --with-logs keeps JS/TS logs (debug build), default strips them (release build).
-    # Don't reset WITH_LOGS so that `WITH_LOGS=1 bash buildPlugin.sh` also works.
+    export WITH_LOGS="0"
     for arg in "$@"; do
         case "$arg" in
-            --with-logs) export WITH_LOGS="1" ;;
+            --with-logs|-WithLogs|-withlogs) export WITH_LOGS="1" ;;
+            --without-logs) export WITH_LOGS="0" ;;
         esac
     done
     if [[ "${WITH_LOGS:-}" == "1" ]]; then
-        print_color "Log mode: INCLUDED (WITH_LOGS=1, debug build)" Yellow
+        print_color "Log mode: INCLUDED (JS logs retained, native ENABLE_DEBUG=true)" Yellow
     else
-        print_color "Log mode: STRIPPED (release build)" Blue
+        print_color "Log mode: STRIPPED (JS logs removed, native ENABLE_DEBUG=false)" Blue
     fi
 
     print_color "Running on Linux (bash)" Blue
     print_color "Project root directory: $PROJECT_ROOT" Green
 
-    # Step 1: Check build/generated directory
     print_color "=== Step 1: Check build/generated directory ===" Blue
     get_package_info
     BUILD_GENERATED_DIR="$PROJECT_ROOT/build/generated"
@@ -645,7 +633,8 @@ main() {
         print_color "Created build/generated directory: $BUILD_GENERATED_DIR" Green
     fi
 
-    # Patch: strip verbose console.log from sn-plugin-lib verifyParams (saves ~4s per modifyElements call)
+    rm -f "$BUILD_GENERATED_DIR/app.npk"
+
     while IFS= read -r -d '' vf; do
         if grep -q "console.log('verifyParams'" "$vf" 2>/dev/null; then
             sed -i "s/  console.log('verifyParams'.*//" "$vf"
@@ -653,39 +642,34 @@ main() {
         fi
     done < <(find "$PROJECT_ROOT/node_modules/sn-plugin-lib" -name 'VerifyUtils.*' -print0 2>/dev/null)
 
-    # Step 2: React Native bundling
     print_color "=== Step 2: Execute React Native bundling ===" Blue
     if ! build_react_native_bundle "$BUILD_GENERATED_DIR"; then
         print_color "React Native bundling failed, script terminated" Red
         exit 1
     fi
 
-    # Step 3: Check root PluginConfig.json
     print_color "=== Step 3: Check root directory PluginConfig.json ===" Blue
     local root_config="$PROJECT_ROOT/PluginConfig.json"
 
     if [[ -f "$root_config" ]]; then
         print_color "Detected root directory PluginConfig.json file already exists, skipping generation step" Yellow
     else
-        # Step 4: Generate random pluginID
         print_color "=== Step 4: Generate random pluginID ===" Blue
         local plugin_id
         plugin_id=$(new_random_string 16)
         print_color "Generated pluginID: $plugin_id" Blue
 
-        # Step 5: Generate PluginConfig.json
         print_color "=== Step 5: Generate root directory PluginConfig.json ===" Blue
         new_plugin_config "$plugin_id"
     fi
 
-    # Every produced package gets a fresh host-visible version before it is copied.
     increment_plugin_version "$root_config"
 
-    # Step 6: Copy PluginConfig.json to build/generated and handle icon
     print_color "=== Step 6: Copy PluginConfig.json to build/generated folder and handle icon ===" Blue
     local build_config="$BUILD_GENERATED_DIR/PluginConfig.json"
     cp "$root_config" "$build_config"
     print_color "Copied root directory PluginConfig.json to build/generated folder" Green
+    remove_native_code_package_reference "$build_config"
 
     if [[ "${WITH_LOGS:-}" == "1" ]]; then
         python3 -c "
@@ -702,58 +686,64 @@ with open(p, 'w', encoding='utf-8') as f:
 
     copy_icon_and_update_path
 
-    # Step 7: Parse manually added packages from Application
-    print_color "=== Step 7: Parse Application.getPackages (manually added packages) ===" Blue
+    print_color "=== Step 7: Parse project ReactPackage implementations ===" Blue
+    PROJECT_PACKAGES=()
+    FOUND_PACKAGES=()
+    for project_src in \
+        "$PROJECT_ROOT/android/app/src/main/java" \
+        "$PROJECT_ROOT/android/src/main/java" \
+        "$PROJECT_ROOT/app/android/src/main/java"; do
+        find_packages_in_directory "$project_src" /dev/null
+    done
+    PROJECT_PACKAGES=("${FOUND_PACKAGES[@]+"${FOUND_PACKAGES[@]}"}")
+    print_color "Project ReactPackage count: ${#PROJECT_PACKAGES[@]}" Blue
+
     APPLICATION_PACKAGES=()
     find_manual_react_packages_from_application
 
-    # Step 8: Scan node_modules for native code
     print_color "=== Step 8: Scan node_modules for Android sources ===" Blue
     NATIVE_MODS=()
     scan_node_modules_native_code
 
-    # Step 9: Build condition check
     print_color "=== Step 9: Build condition check ===" Blue
     local should_build=false
-    if [[ ${#APPLICATION_PACKAGES[@]} -gt 0 ]] || [[ ${#NATIVE_MODS[@]} -gt 0 ]]; then
+    if [[ ${
         should_build=true
     fi
 
     if $should_build; then
-        print_color "Build conditions met: project packages=${#APPLICATION_PACKAGES[@]}, third-party native modules=${#NATIVE_MODS[@]}" Green
+        print_color "Build conditions met: project packages=$((${#PROJECT_PACKAGES[@]} + ${#APPLICATION_PACKAGES[@]})), third-party native modules=${#NATIVE_MODS[@]}" Green
 
-        # Step 10: Gradle APK build
         print_color "=== Step 10: Invoke Gradle to build APK ===" Blue
         local build_success=false
         if build_android_apk "false"; then
             build_success=true
         fi
 
-        # Step 11: Copy APK and update nativeCodePackage
         if $build_success; then
             print_color "=== Step 11: Copy APK and update nativeCodePackage ===" Blue
             if ! copy_apk_and_update_config; then
-                print_color "Failed to copy APK or update configuration" Red
+                print_color "Failed to copy APK or update configuration; package generation stopped" Red
+                return 1
             fi
         else
-            print_color "Gradle build failed, skipping APK copy and configuration update" Red
+            print_color "Gradle build failed; package generation stopped" Red
+            return 1
         fi
 
-        # Step 12: Parse Autolinking PackageList.java
         print_color "=== Step 12: Parse Autolinking PackageList.java and merge lists ===" Blue
         AUTOLINKING_PACKAGES=()
         get_react_packages_from_autolinking_source
 
-        # Merge and deduplicate
         local all_pkgs=()
+        all_pkgs+=("${PROJECT_PACKAGES[@]+"${PROJECT_PACKAGES[@]}"}")
         all_pkgs+=("${APPLICATION_PACKAGES[@]+"${APPLICATION_PACKAGES[@]}"}")
         all_pkgs+=("${AUTOLINKING_PACKAGES[@]+"${AUTOLINKING_PACKAGES[@]}"}")
         local dedup_pkgs=()
-        if [[ ${#all_pkgs[@]} -gt 0 ]]; then
+        if [[ ${
             mapfile -t dedup_pkgs < <(printf '%s\n' "${all_pkgs[@]}" | sort -u)
         fi
 
-        # Step 13: Write reactPackages field
         print_color "=== Step 13: Write reactPackages field ===" Blue
         for p in "${dedup_pkgs[@]+"${dedup_pkgs[@]}"}"; do
             print_color "  - write: $p" Green
@@ -763,7 +753,6 @@ with open(p, 'w', encoding='utf-8') as f:
         print_color "Build conditions not met; skipping steps 10-13 and proceeding to packaging" Yellow
     fi
 
-    # Step 14: Package and generate .snplg
     print_color "=== Step 14: Package build/generated directory and generate .snplg file ===" Blue
     local build_outputs="$PROJECT_ROOT/build/outputs"
     local dev_suffix=""

@@ -1,17 +1,47 @@
-// babel.config.js
-//
-// By default (WITH_LOGS !== '1') strips console/FileLogger calls at compile time
-// for a clean release build. Set WITH_LOGS=1 to keep logs (debug build).
-// buildPlugin.sh --with-logs / buildPlugin.ps1 -WithLogs set this env var.
+
+
+
+
+
+
+function stripLogsPlugin({ types: t }) {
+  const targets = new Set(['console', 'FileLogger']);
+
+  function isStripTarget(path) {
+    const callee = path.get('callee');
+    if (!callee.isMemberExpression()) return false;
+    const object = callee.get('object');
+    return object.isIdentifier() && targets.has(object.node.name);
+  }
+
+  return {
+    name: 'strip-logs',
+    visitor: {
+      CallExpression(path) {
+        if (!isStripTarget(path)) return;
+
+        const target = path.parentPath.isAwaitExpression()
+          ? path.parentPath
+          : path;
+
+        if (target.parentPath.isExpressionStatement()) {
+          target.parentPath.remove();
+        } else {
+          path.replaceWith(t.unaryExpression('void', t.numericLiteral(0)));
+        }
+      },
+    },
+  };
+}
 
 module.exports = function (api) {
   const withLogs = process.env.WITH_LOGS === '1';
 
-  // Cache per WITH_LOGS value so switching modes uses the right cache without --reset-cache.
+  
   api.cache.using(() => process.env.WITH_LOGS);
 
   return {
     presets: ['module:@react-native/babel-preset'],
-    plugins: withLogs ? [] : ['./scripts/babel-plugin-strip-logs.js'],
+    plugins: withLogs ? [] : [stripLogsPlugin],
   };
 };
