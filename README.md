@@ -236,7 +236,6 @@ Long pressing Smart Lasso is a shortcut. It syncs to your default device, or ope
 - **Wi-Fi**: sending, receiving, and AI Relay all need it.
 - **RikkaHub authentication**: AI Relay can't connect while it's on.
 - **Documents**: Text Receive, AI insertion, and Formula mode only work in Notes.
-- **Document links**: they can only be inserted on the main layer.
 
 ## Build from Source
 
@@ -254,12 +253,6 @@ npm install
 
 The package is written to `build/outputs/plugin_notipal.snplg`. Copy it to your Supernote, or send it over LocalSend from a device already running Notipal.
 
-Add `--with-logs` (`-WithLogs` on Windows) for a developer build. It keeps logging, is named **Notipal - Dev**, and unlocks the settings panel:
-
-- **Toolbar**: reorder, hide, and restore tools, including **Insert Link** for linking a document into a note.
-- **Connections**: manage the default LocalSend device and the paired AI Relay phone.
-- **About**: the version number and feedback links.
-
 | Path | Contents |
 | --- | --- |
 | `index.js`, `App.tsx`, `components/` | Plugin entry, toolbar actions, clipboards, text insertion, AI and formula flows (React Native) |
@@ -275,4 +268,4 @@ Join the [Notipal Discord](https://discord.gg/Z8NwyGWrbj) to share tips, report 
 
 [MIT](LICENSE)
 
-Notipal is an independent project. It isn't made by or affiliated with Supernote or Ratta.
+Notipal is not an official plugin. Supernote and Ratta are not responsible for anything that happens while you use it. All icon resources and logic code used by this plugin are the property of Ratta, and may not be used for any commercial purpose.
