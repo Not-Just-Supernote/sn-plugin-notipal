@@ -266,6 +266,6 @@ Join the [Notipal Discord](https://discord.gg/Z8NwyGWrbj) to share tips, report 
 
 ## License
 
-[MIT](LICENSE)
+Non-commercial use only. See [LICENSE](LICENSE).
 
 Notipal is not an official plugin. Supernote and Ratta are not responsible for anything that happens while you use it. All icon resources and logic code used by this plugin are the property of Ratta, and may not be used for any commercial purpose.
