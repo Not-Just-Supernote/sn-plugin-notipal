@@ -65,6 +65,9 @@ internal object PenGuardTiming {
     val PEN_LASSO_REARM_DELAYS_MS = longArrayOf(400L, 900L, 1_700L)
 
     
+    const val PEN_LASSO_KEEP_ALIVE_MS = 800L
+
+    
     const val PEN_SELECTION_ACTION_TIMEOUT_MS = 20_000L
     const val PEN_SELECTION_SESSION_TIMEOUT_MS = 120_000L
 }

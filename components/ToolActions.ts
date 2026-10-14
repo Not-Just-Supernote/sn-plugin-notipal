@@ -1136,6 +1136,50 @@ export async function extractMosaicLassoText(
 }
 
 
+async function convertStickerWithPreparedContours(elements: any[], context: {
+  path: string; pageWidth: number; pageHeight: number;
+  machineType: number; runtimeDeviceType: number;
+}): Promise<any> {
+  const uuids = elements.map(element => element?.uuid);
+  if (uuids.some(uuid => typeof uuid !== 'string' || uuid.length === 0)) {
+    throw new Error('Sticker element UUID missing');
+  }
+  const display: any = await PluginCommAPI.getPageDisplaySize();
+  const displayWidth = Number(display?.result?.width);
+  const displayHeight = Number(display?.result?.height);
+  if (!display?.success || !Number.isFinite(displayWidth) || displayWidth <= 0 ||
+      !Number.isFinite(displayHeight) || displayHeight <= 0) {
+    throw new Error('Sticker display dimensions unavailable');
+  }
+  const originalAccessors = elements.map(element => element.contoursSrc);
+  const prepared = await FloatingToolbar.clearClipboardContours(uuids, {
+    ...context, displayWidth, displayHeight,
+  });
+  try {
+    if (prepared?.processed !== elements.length || !Array.isArray(prepared?.clearedIndexes)) {
+      throw new Error('Sticker contours preparation incomplete');
+    }
+    for (const index of prepared.clearedIndexes) elements[index].contoursSrc = null;
+    if (prepared.contourElements > 0) {
+      return await FloatingToolbar.convertClipboardSticker(elements.map(element => ({
+        uuid: element.uuid, maxX: element.maxX, maxY: element.maxY, layerNum: element.layerNum,
+      })), context);
+    }
+    return await NativeModules.NativePluginAPI.convertElement2Sticker({
+      machineType: context.machineType, elements, stickerPath: context.path,
+    });
+  } finally {
+    try {
+      await FloatingToolbar.restoreClipboardContours(context.path);
+    } finally {
+      elements.forEach((element, index) => {
+        element.contoursSrc = originalAccessors[index];
+        element.contoursSrc?.clearCache?.();
+      });
+    }
+  }
+}
+
 async function mosaicClipSave(slot: string, opts: { deleteAfter?: boolean } = {}): Promise<string> {
   if (!isMosaicInkSurface()) return 'Mosaic clip deferred: Mosaic surface is not active';
   const selection = await readMosaicSidecar(MOSAIC_LASSO_FILE);
@@ -1171,8 +1215,9 @@ async function mosaicClipSave(slot: string, opts: { deleteAfter?: boolean } = {}
 
   
   
-  const convertRes: any = await NativeModules.NativePluginAPI.convertElement2Sticker({
-    machineType: deviceType, elements, stickerPath: path,
+  const convertRes: any = await convertStickerWithPreparedContours(elements, {
+    path, pageWidth: pageSize.width, pageHeight: pageSize.height,
+    machineType: deviceType, runtimeDeviceType,
   });
   if (!convertRes?.success || convertRes.result === false) {
     NativeUIUtils.showErrorTipDialog(t('clip_save_failed'));
@@ -1262,6 +1307,23 @@ async function clipSmartAction(slot: string): Promise<string> {
     return saveResult;
   } finally {
     _clipBusy = false;
+  }
+}
+
+async function saveNoteClipboardSticker(elements: any[], context: {
+  path: string; pageWidth: number; pageHeight: number;
+  machineType: number; runtimeDeviceType: number;
+}): Promise<any> {
+  const range = normalizeStickerElementCoordinateMetadata(elements, {
+    width: context.pageWidth, height: context.pageHeight,
+  });
+  if (!range) throw new Error('Sticker coordinate metadata unavailable');
+  const sourceLayers = elements.map(element => element.layerNum);
+  try {
+    for (const element of elements) element.layerNum = 0;
+    return await convertStickerWithPreparedContours(elements, context);
+  } finally {
+    elements.forEach((element, index) => { element.layerNum = sourceLayers[index]; });
   }
 }
 
@@ -1361,44 +1423,27 @@ async function clipSave(slot: string): Promise<string> {
     return `Save clip ${slot} failed (page size unavailable)`;
   }
 
-  const sourceRange = normalizeStickerElementCoordinateMetadata(snapshot.result, sourcePageSize);
-  if (!sourceRange) {
-    NativeUIUtils.showErrorTipDialog(t('clip_save_failed'));
-    return `Save clip ${slot} failed (coordinate metadata unavailable)`;
-  }
-
   const runtimeDeviceType = await PluginManager.getDeviceType();
   const deviceType = stickerMachineTypeForPageSize(sourcePageSize, runtimeDeviceType);
+  const saveApi = 'convertElement2Sticker';
   console.log('[CLIP-DBG] sticker target machineType=', deviceType,
     'runtimeDeviceType=', runtimeDeviceType,
     'coordinateMode=android-page',
     'elements=', snapshot.result.length,
     'sourcePageSize=', `${sourcePageSize.width}x${sourcePageSize.height}`,
-    'sourceMax=', `${sourceRange.maxX}x${sourceRange.maxY}`);
-  
-  
-  
-  const sourceLayers: number[] = snapshot.result.map((element: any) => element.layerNum);
-  const nonMainLayers = Array.from(new Set(sourceLayers.filter(n => Number.isInteger(n) && n !== 0)));
-  if (nonMainLayers.length) {
-    console.log('[CLIP-DBG] sticker conversion remaps source layers=', JSON.stringify(nonMainLayers), 'to MAINLAYER');
-  }
+    'saveApi=', saveApi);
   let nativeSaved = false;
   try {
-    for (const element of snapshot.result) element.layerNum = 0;
-    const converted: any = await NativeModules.NativePluginAPI.convertElement2Sticker({
-      machineType: deviceType,
-      elements: snapshot.result,
-      stickerPath: path,
+    const converted: any = await saveNoteClipboardSticker(snapshot.result, {
+      path, pageWidth: sourcePageSize.width, pageHeight: sourcePageSize.height,
+      machineType: deviceType, runtimeDeviceType,
     });
-    console.log('[CLIP-DBG] convertElement2Sticker machineType=', deviceType,
+    console.log('[CLIP-DBG] sticker save API=', saveApi, 'machineType=', deviceType,
       'result=', JSON.stringify(converted),
       'elapsedMs=', Date.now() - startedAt);
     nativeSaved = !!converted?.success && converted.result !== false;
   } catch (error) {
-    console.warn('[CLIP-DBG] convertElement2Sticker threw', error);
-  } finally {
-    snapshot.result.forEach((element: any, index: number) => { element.layerNum = sourceLayers[index]; });
+    console.warn('[CLIP-DBG] sticker save threw API=', saveApi, error);
   }
   if (!nativeSaved) {
     NativeUIUtils.showErrorTipDialog(t('clip_save_failed'));

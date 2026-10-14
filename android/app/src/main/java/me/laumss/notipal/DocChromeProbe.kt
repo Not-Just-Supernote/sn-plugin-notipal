@@ -11,6 +11,7 @@ internal object DocChromeProbe {
     private const val TAG = "DocChromeProbe"
     private const val SETTLE_MS = 400L
     private const val DOC_ACTIVITY_MARKER = "ACTIVITY com.supernote.document/"
+    private const val NOTE_ACTIVITY_MARKER = "ACTIVITY com.ratta.supernote.note/"
 
     private val main = Handler(Looper.getMainLooper())
     private val worker = Executors.newSingleThreadExecutor()
@@ -25,16 +26,16 @@ internal object DocChromeProbe {
 
     private val probeRunnable: Runnable = Runnable {
         val reason = pendingReason
-        if (!FloatingToolbarModule.isDocumentContext()) {
-            FloatingPenGuard.setHostChromeAreas(emptyList(), "not document: $reason")
+        val document = FloatingToolbarModule.isDocumentContext()
+        if (probeInFlight) {
+            request(pendingReason)
             return@Runnable
         }
-        if (probeInFlight) return@Runnable
         probeInFlight = true
         val epoch = contextEpoch
         val menuToken = SubviewLogMonitor.toolbarMenuProbeToken()
         worker.execute {
-            val snapshot = query()
+            val snapshot = query(document)
             main.post {
                 probeInFlight = false
                 if (epoch != contextEpoch) return@post
@@ -42,9 +43,9 @@ internal object DocChromeProbe {
                     absentMenuToken = null
                     return@post
                 }
-                if (FloatingToolbarModule.isDocumentContext()) {
+                if (FloatingToolbarModule.isDocumentContext() == document) {
                     FloatingPenGuard.setHostChromeAreas(snapshot.rects, reason)
-                    if (menuToken != null && menuToken == SubviewLogMonitor.toolbarMenuProbeToken() &&
+                    if (document && menuToken != null && menuToken == SubviewLogMonitor.toolbarMenuProbeToken() &&
                         snapshot.menuVisible == false) {
                         if (absentMenuToken == menuToken) {
                             Log.i(TAG, "document toolbar menus closed generation=${menuToken.first}")
@@ -56,9 +57,8 @@ internal object DocChromeProbe {
                     } else {
                         absentMenuToken = null
                     }
-                } else {
-                    FloatingPenGuard.setHostChromeAreas(emptyList(), "left document: $reason")
                 }
+
             }
         }
     }
@@ -77,10 +77,10 @@ internal object DocChromeProbe {
         FloatingPenGuard.setHostChromeAreas(emptyList(), reason)
     }
 
-    private fun query(): Snapshot? = try {
+    private fun query(document: Boolean): Snapshot? = try {
         val proc = ProcessBuilder("dumpsys", "activity", "top")
             .redirectErrorStream(true).start()
-        val result = proc.inputStream.bufferedReader().useLines { parseSnapshot(it) }
+        val result = proc.inputStream.bufferedReader().useLines { parseSnapshot(it, document) }
         if (proc.waitFor() == 0) result else null
     } catch (e: Exception) {
         Log.w(TAG, "dumpsys failed: ${e.message}")
@@ -101,7 +101,7 @@ internal object DocChromeProbe {
 
     internal fun parse(lines: Sequence<String>): List<Rect> = parseSnapshot(lines).rects
 
-    internal fun parseSnapshot(lines: Sequence<String>): Snapshot {
+    internal fun parseSnapshot(lines: Sequence<String>, document: Boolean = true): Snapshot {
         val out = mutableListOf<Rect>()
         var inDoc = false
         var resumed = false
@@ -113,7 +113,7 @@ internal object DocChromeProbe {
         for (raw in lines) {
             val line = raw.trimEnd('\r')
             if (line.startsWith("  ACTIVITY ")) {
-                inDoc = line.contains(DOC_ACTIVITY_MARKER)
+                inDoc = line.contains(if (document) DOC_ACTIVITY_MARKER else NOTE_ACTIVITY_MARKER)
                 resumed = false
                 inHierarchy = false
                 stack.clear()
@@ -163,7 +163,10 @@ internal object DocChromeProbe {
             if (resumed && parent?.isSideBar == true && visible && focusable && r > l && b > t) {
                 menuVisible = true
             }
-            if (visible && inSideBar && cls.endsWith(".ButtonBoxView") && r > l && b > t) {
+            val noteBottom = !document &&
+                (line.contains("app:id/ll_page}") || line.contains("app:id/ll_fileName}"))
+            if (resumed && visible && r > l && b > t &&
+                ((document && inSideBar && cls.endsWith(".ButtonBoxView")) || noteBottom)) {
                 out += Rect(left, top, left + (r - l), top + (b - t))
             }
         }

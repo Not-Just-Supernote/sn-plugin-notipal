@@ -119,6 +119,9 @@ object NativeLocale {
                                      to "Could not save the screenshot. Check file permissions and retry."),
         "mosaic_insert_failed" to ("无法插入 Mosaic 卡片，请检查文件权限后重试"
                                     to "Could not insert the Mosaic card. Check file permissions and retry."),
+        "mosaic_note_import" to ("导入整本笔记到 Mosaic" to "Import entire note into Mosaic"),
+        "mosaic_note_import_progress" to ("正在导入笔记：第 %d/%d 页" to "Importing note: page %d of %d"),
+        "mosaic_note_import_ready" to ("已读取 %d 页，正在 Mosaic 中打开" to "Read %d pages. Opening in Mosaic."),
         "mosaic_note_importing" to ("正在读取整本笔记，完成后在 Mosaic 中打开"
                                     to "Reading the whole note. It opens in Mosaic when done."),
         "mosaic_note_import_failed" to ("无法导入笔记到 Mosaic，请稍后重试"

@@ -21,7 +21,7 @@ import {
   stopMode, stopAiMode, stopTextReceive,
 } from './components/BackgroundService';
 import { executeAction, attachModeListeners, detachModeListeners, getPaletteLassoInfo, snapshotCreate, snapshotRestore, snapshotDelete } from './components/ToolActions';
-import { modifyLiveElements, modifyFileElements, ensureMarkerDirection, isMarkerStroke, MARKER_PT } from './components/ElementOps';
+import { modifyPaletteElements, ensureMarkerDirection, isMarkerStroke, MARKER_PT } from './components/ElementOps';
 import {
   hostCall, rectFromHost, reselectLasso, prepareInsertedStickerSelection,
   commitSelectionAndRead, pickReselectRect, beginLassoTxn, endLassoTxn, isLassoTxnBusy,
@@ -716,6 +716,8 @@ function App(): React.JSX.Element {
       }
       let ownedEls: any[] | null = null;
       let prefetchRecycled = false;
+      let recoveryRect = capturedContext?.lassoRect ?? null;
+      let noteSelection = false;
       const t0 = Date.now();
       const convertingToMarker = wantPenType && penType === MARKER_PT;
       const prefetchedHasMarker = !!prefetchedEls?.some(isMarkerStroke);
@@ -746,6 +748,7 @@ function App(): React.JSX.Element {
           pageNum = pgRes.result;
         }
         const isNoteFile = /\.note$/i.test(filePath);
+        noteSelection = isNoteFile;
 
         const sel = await commitSelectionAndRead({
           tag, pageNum, filePath, elementNums,
@@ -769,6 +772,7 @@ function App(): React.JSX.Element {
 
         
         const reselectRect = await pickReselectRect(sel, tag);
+        recoveryRect = reselectRect;
 
         applyPaletteFields(targets, penColor, thickness, penType);
         if (convertingToMarker) {
@@ -779,9 +783,7 @@ function App(): React.JSX.Element {
 
         
         
-        const modRes: any = isNoteFile
-          ? await modifyLiveElements(targets, pageNum)
-          : await modifyFileElements(filePath, pageNum, targets);
+        const modRes: any = await modifyPaletteElements(filePath, pageNum, targets, { penColor, thickness, penType });
         const modCount = Array.isArray(modRes?.result) ? modRes.result.length : -1;
         console.log(`[PLT/${tag}] live ok=${modRes?.success} modified=${modCount}/${targets.length} err=${modRes?.error?.message ?? ''} +${Date.now() - t0}ms`);
         if (!modRes?.success) {
@@ -792,10 +794,11 @@ function App(): React.JSX.Element {
           console.warn(`[PLT/${tag}] host SKIPPED ${skipped.length} strokes: nums=${JSON.stringify(skipped)}`);
         }
 
-        if (modRes?.success && !isNoteFile) {
+        if (modRes?.success && (!isNoteFile || modRes.requiresReload)) {
           
           const rel: any = await PluginCommAPI.reloadFile();
           console.log(`[PLT/${tag}] reloadFile ok=${rel?.success} +${Date.now() - t0}ms`);
+          if (!rel?.success) throw new Error('Palette reload failed after saving');
         }
 
         
@@ -816,6 +819,11 @@ function App(): React.JSX.Element {
         console.log(`[PLT/${tag}] DONE ${Date.now() - t0}ms`);
       } catch (e) {
         console.error(`[PLT/${tag}] CRASH:`, e);
+        const reselected = noteSelection && recoveryRect
+          ? await reselectLasso(recoveryRect, `${tag}/recover`).catch(() => false)
+          : false;
+        try { FloatingToolbarBridge.parkToolbarForLasso(reselected); } catch (_) {}
+        NativeUIUtils.showErrorTipDialog(t('palette_apply_failed'));
         throw e;
       } finally {
         if (ownedEls) {

@@ -153,16 +153,31 @@ export async function prepareInsertedStickerSelection(): Promise<boolean> {
   }
 }
 
+
+export async function contourRings(el: any, scale = { x: 1, y: 1 }): Promise<{ x: number; y: number }[][]> {
+  const data = el?.contoursSrc;
+  const count = Array.isArray(data) ? data.length : await data?.size?.();
+  if (!(count > 0)) return [];
+  const rings = Array.isArray(data) ? data : await data.getRange(0, count);
+  if (!Array.isArray(rings) || rings.length !== count) throw new Error('Incomplete contour data');
+  return rings.map((ring: any[]) => {
+    if (!Array.isArray(ring)) throw new Error('Invalid contour ring');
+    return ring.map(p => {
+      if (!Number.isFinite(p?.x) || !Number.isFinite(p?.y)) throw new Error('Invalid contour coordinate');
+      return { x: p.x * scale.x, y: p.y * scale.y };
+    });
+  }).filter(ring => ring.length > 0);
+}
+
 export async function committedInkRect(elements: any[], size: { width: number; height: number }) {
   let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
   for (const el of elements) {
     let points: any[];
     if (el.type === 0 && el.stroke?.points) {
       const count = await el.stroke.points.size();
-      if (!(count > 0)) return null;
       
       
-      points = await el.stroke.points.getRange(0, count);
+      points = count > 0 ? await el.stroke.points.getRange(0, count) : (await contourRings(el)).flat();
     } else if (el.type === 700 && el.geometry?.points?.length) {
       points = el.geometry.points;
     } else return null;
@@ -256,11 +271,12 @@ export function pickReplacementInk(
 
 
 
-export type InkShape = { type: number; count: number; samples: { x: number; y: number }[] };
+export type InkShape = { type: number; count: number; rings?: string; samples: { x: number; y: number }[] };
 
-export async function inkShape(el: any): Promise<InkShape | null> {
+export async function inkShape(el: any, contourScale = { x: 1, y: 1 }): Promise<InkShape | null> {
   try {
     let count = 0;
+    let rings: string | undefined;
     let pick: (i: number) => Promise<{ x: number; y: number } | null>;
     if (el?.type === 0 && el.stroke?.points) {
       count = await el.stroke.points.size();
@@ -268,6 +284,13 @@ export async function inkShape(el: any): Promise<InkShape | null> {
         const r = await el.stroke.points.getRange(i, 1);
         return r?.[0] ?? null;
       };
+      if (!(count > 0)) {
+        const outlines = await contourRings(el, contourScale);
+        const flat = outlines.flat();
+        count = flat.length;
+        rings = outlines.map(ring => ring.length).join(',');
+        pick = async i => flat[i] ?? null;
+      }
     } else if (el?.type === 700 && Array.isArray(el.geometry?.points)) {
       count = el.geometry.points.length;
       pick = async (i) => el.geometry.points[i] ?? null;
@@ -280,7 +303,7 @@ export async function inkShape(el: any): Promise<InkShape | null> {
       if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y)) return null;
       samples.push({ x: p.x, y: p.y });
     }
-    return { type: el.type, count, samples };
+    return { type: el.type, count, rings, samples };
   } catch (_) {
     return null;
   }
@@ -292,7 +315,7 @@ export async function matchMovedInk(pool: any[], wanted: InkShape[]): Promise<an
   const TOL = 4;
   const near = (a: number, b: number) => Math.abs(a - b) <= TOL;
   const sameShape = (a: InkShape, b: InkShape) =>
-    a.type === b.type && a.count === b.count && a.samples.length === b.samples.length &&
+    a.type === b.type && a.count === b.count && a.rings === b.rings && a.samples.length === b.samples.length &&
     a.samples.every((p, i) =>
       near(p.x - a.samples[0].x, b.samples[i].x - b.samples[0].x) &&
       near(p.y - a.samples[0].y, b.samples[i].y - b.samples[0].y));
@@ -447,8 +470,16 @@ export async function commitSelectionAndRead(opts: {
   
   
   const wantShapes: InkShape[] = [];
+  let contourScale = { x: 1, y: 1 };
+  if (prefetchedEls.some(el => el?.contoursSrc)) {
+    const pageSize = await getHostPageSize(filePath, pageNum, `${tag}/contour-size`);
+    const display: any = await PluginCommAPI.getPageDisplaySize();
+    if (pageSize && display?.success && display.result?.width > 0 && display.result?.height > 0) {
+      contourScale = { x: pageSize.width / display.result.width, y: pageSize.height / display.result.height };
+    }
+  }
   for (const el of prefetchedEls.filter(isPaletteInk)) {
-    const shape = await inkShape(el);
+    const shape = await inkShape(el, contourScale);
     if (!shape) { wantShapes.length = 0; break; }
     wantShapes.push(shape);
   }
@@ -490,8 +521,9 @@ export async function commitSelectionAndRead(opts: {
     (el: any) => el?.numInPage != null && numSet.has(el.numInPage) && accept(el));
 
   let numsStale = false;
-  if (targets.length === 0) {
+  if (targets.length !== elementNums.length) {
     numsStale = true;
+    targets = [];
     
     
     
@@ -499,9 +531,10 @@ export async function commitSelectionAndRead(opts: {
     if (uuidSet.size > 0) {
       targets = pageEls.filter(
         (el: any) => typeof el?.uuid === 'string' && uuidSet.has(el.uuid) && accept(el));
+      if (targets.length !== elementNums.length) targets = [];
       if (targets.length > 0) console.warn(`[PLT/${tag}] nums stale -> uuid match ${targets.length}/${wantUuids.length}`);
     }
-    if (targets.length === 0 && wantShapes.length > 0) {
+    if (targets.length === 0 && wantShapes.length === elementNums.length) {
       targets = (await matchMovedInk(pageEls, wantShapes)).filter(accept);
       if (targets.length > 0) {
         console.warn(`[PLT/${tag}] nums stale -> shape match nums=${JSON.stringify(targets.map((el: any) => el?.numInPage))}`);
@@ -517,6 +550,7 @@ export async function commitSelectionAndRead(opts: {
       const freshNums = new Set(await lassoNumsInRect(lassoRectBefore, tag));
       targets = pageEls.filter(
         (el: any) => el?.numInPage != null && freshNums.has(el.numInPage) && accept(el));
+      if (targets.length !== elementNums.length) targets = [];
       if (targets.length > 0) {
         console.warn(`[PLT/${tag}] nums stale -> re-lasso nums=${JSON.stringify(targets.map((el: any) => el?.numInPage))}`);
       }

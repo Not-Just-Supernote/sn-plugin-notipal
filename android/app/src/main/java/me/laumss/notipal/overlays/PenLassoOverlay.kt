@@ -91,6 +91,15 @@ class PenLassoOverlay(private val context: ReactApplicationContext) {
     private var fullAutoEnabled = false
     private val releaseFullAutoRunnable = Runnable { setFullUiAuto(false, "release-delay") }
 
+    
+    private val guardKeepAliveRunnable = object : Runnable {
+        override fun run() {
+            if (rootView == null) return
+            FloatingPenGuard.reassert("pen lasso keep-alive stage=$stage")
+            handler.postDelayed(this, PenGuardTiming.PEN_LASSO_KEEP_ALIVE_MS)
+        }
+    }
+
     private val points = mutableListOf<PointF>()
 
     
@@ -116,6 +125,8 @@ class PenLassoOverlay(private val context: ReactApplicationContext) {
                 oneArg.invoke(eink, enable)
             }
             fullAutoEnabled = enable
+            
+            if (rootView != null) FloatingPenGuard.reassert("pen lasso fullUiAuto=$enable reason=$reason")
             if (BuildConfig.ENABLE_DEBUG) android.util.Log.i(TAG, "fullUiAuto=$enable reason=$reason")
         } catch (e: Exception) {
             if (BuildConfig.ENABLE_DEBUG) android.util.Log.w(TAG, "fullUiAuto call exception reason=$reason: ${e.message}")
@@ -153,11 +164,14 @@ class PenLassoOverlay(private val context: ReactApplicationContext) {
 
         val root = object : FrameLayout(context) {
             override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+                if (ev.actionMasked == MotionEvent.ACTION_DOWN) armDrawPath("input-down")
                 if (hintBar?.visibility == View.VISIBLE) return true
                 super.dispatchTouchEvent(ev)
                 return true
             }
             override fun dispatchGenericMotionEvent(ev: MotionEvent): Boolean {
+                if (ev.actionMasked == MotionEvent.ACTION_HOVER_ENTER &&
+                    ev.isFromSource(InputDevice.SOURCE_STYLUS)) armDrawPath("pen-hover-enter")
                 if (hintBar?.visibility == View.VISIBLE) return true
                 if (ev.isFromSource(InputDevice.SOURCE_STYLUS)) return true
                 return super.dispatchGenericMotionEvent(ev)
@@ -203,6 +217,8 @@ class PenLassoOverlay(private val context: ReactApplicationContext) {
         if (BuildConfig.ENABLE_DEBUG) android.util.Log.i(TAG, "overlay shown, waiting for pen stroke...")
 
         armDrawPath("show-initial")
+        handler.removeCallbacks(guardKeepAliveRunnable)
+        handler.postDelayed(guardKeepAliveRunnable, PenGuardTiming.PEN_LASSO_KEEP_ALIVE_MS)
         
         
         
@@ -832,6 +848,7 @@ class PenLassoOverlay(private val context: ReactApplicationContext) {
     }
 
     private fun cleanup() {
+        handler.removeCallbacks(guardKeepAliveRunnable)
         timeoutRunnable?.let { handler.removeCallbacks(it) }; timeoutRunnable = null
         handler.removeCallbacks(hideHintBarRunnable)
         handler.removeCallbacks(releaseFullAutoRunnable)

@@ -99,6 +99,7 @@ const STRINGS = {
   clip_empty_hint:        { zh: '剪贴板为空，请先用套索选中内容保存', en: 'Clipboard is empty. Select content with lasso first.' },
   palette_ink_only:       { zh: 'Palette 只对手写笔迹生效', en: 'Palette only works on handwriting' },
   palette_need_lasso:     { zh: '请先圈选要换笔的笔迹', en: 'Lasso the strokes to restyle first' },
+  palette_apply_failed:   { zh: '调色盘处理失败，请重新圈选后重试', en: 'Palette update failed. Select the strokes again and retry.' },
   clip_err_read_failed:   { zh: '读取套索内容失败，请稍候重试', en: 'Failed to read lasso content. Please try again.' },
   clip_save_failed:       { zh: '剪贴板保存失败，请重试', en: 'Clipboard save failed, please retry' },
   snapshot_empty_page:    { zh: '当前页没有可保存的内容', en: 'Nothing on this page to snapshot' },

@@ -114,6 +114,9 @@ internal object HostPenSignals {
             commitBaseline = !transientHostUi && !rotationActive
         )
         val guardActive = FloatingPenGuard.hasActiveRects()
+        if (accepted && !isWritableReset && !isFullScreenSnapshot && !transientHostUi && !rotationActive) {
+            DocChromeProbe.request("host native pen snapshot")
+        }
         if (BuildConfig.ENABLE_DEBUG) {
             Log.i(TAG, "host native pen snapshot count=${rects.size} rects=$rects " +
                 "accepted=$accepted transientUi=$transientHostUi " +
@@ -125,6 +128,8 @@ internal object HostPenSignals {
             
             if (accepted) FloatingPenGuard.reassert("rotation full-screen hold")
         } else if (accepted && guardActive && !isWritableReset) {
+            
+            FloatingPenGuard.reassert("host native pen snapshot immediate")
             scheduleReassert(
                 reason = "host native pen snapshot",
                 delayMs = PenGuardTiming.HOST_SNAPSHOT_REASSERT_DELAY_MS

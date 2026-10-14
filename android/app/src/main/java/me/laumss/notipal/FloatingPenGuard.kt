@@ -364,6 +364,17 @@ internal object FloatingPenGuard {
             val normalized = raw.filterNot(PenAreaGeometry::isClearSentinel)
             transientFullScreen = normalized.size == 1 && isScreenCovering(normalized[0])
             if (commitBaseline && !writableReset && !transientFullScreen && normalized.isNotEmpty()) {
+                
+                
+                if (appName != DOC_APP_NAME && displayRotation == Surface.ROTATION_0 &&
+                    normalized.size == 1 &&
+                    hostSnapshot.contains(normalized[0]) && hostChromeLogical.isEmpty()) {
+                    val bottom = hostSnapshot.filter {
+                        it.top >= logicalScreenHeight * 4 / 5 &&
+                            it.bottom <= logicalScreenHeight && it.height() > 0
+                    }
+                    hostChromeLogical.addAll(bottom.map(::Rect))
+                }
                 hostSnapshot.clear()
                 hostSnapshot.addAll(normalized.map(::Rect))
                 baselineCommitted = true
@@ -625,7 +636,7 @@ internal object FloatingPenGuard {
         
         if (!view.isAttachedToWindow) return
         
-        if (view.visibility != View.VISIBLE) {
+        if (!view.isShown) {
             releaseRect(key)
             return
         }

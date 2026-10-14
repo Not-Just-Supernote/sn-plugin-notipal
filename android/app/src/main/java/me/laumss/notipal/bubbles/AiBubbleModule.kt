@@ -387,13 +387,17 @@ class AiBubbleModule(reactContext: ReactApplicationContext) :
         }
 
         windowManager?.addView(outerWrapper, layoutParams)
-        FloatingPenGuard.track("ai_bubble", outerWrapper)
+        
+        FloatingPenGuard.track("ai_bubble", capsule)
+        inboxCol?.let { FloatingPenGuard.track("ai_bubble_inbox", it) }
         if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "AI bubble shown: mode=$currentMode text='$text'")
     }
 
     
     private fun rebuildActionRow() {
         val row = actionRow ?: return
+        
+        FloatingPenGuard.remove("ai_bubble_actions")
         row.removeAllViews()
         row.setBackgroundColor(Color.TRANSPARENT)
         if (currentMode == MODE_VOICE) { row.visibility = View.GONE; return }
@@ -410,6 +414,7 @@ class AiBubbleModule(reactContext: ReactApplicationContext) :
                 
                 row.orientation = LinearLayout.VERTICAL
                 row.setBackgroundColor(CLR_PANEL)
+                FloatingPenGuard.track("ai_bubble_actions", row)
                 row.addView(TextView(reactApplicationContext).apply {
                     text = NativeLocale.t("ai_mode_choose")
                     textSize = sp(13f); setTextColor(CLR_INK)
@@ -499,6 +504,7 @@ class AiBubbleModule(reactContext: ReactApplicationContext) :
                     }
                 }
                 row.addView(button)
+                FloatingPenGuard.track("ai_bubble_action_$i", button)
             }
             tryUpdateLayout()
         } catch (e: Exception) {

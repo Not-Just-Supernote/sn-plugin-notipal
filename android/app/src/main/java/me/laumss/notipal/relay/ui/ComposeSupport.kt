@@ -89,30 +89,31 @@ internal fun EinkCheckbox(checked: Boolean) {
 
 
 
-private const val DU_MODE = 1
+
+private const val A2_MODE = 4
 private const val RELEASE_DELAY_MS = 140L
 
-private class DuScrollController(private val view: View) {
+private class A2ScrollController(private val view: View) {
     private var enabled = false
     fun setEnabled(value: Boolean) {
         if (enabled == value) return
         try {
-            if (value) View::class.java.getMethod("setEinkUpdateMode", Int::class.javaPrimitiveType).invoke(view, DU_MODE)
+            if (value) View::class.java.getMethod("setEinkUpdateMode", Int::class.javaPrimitiveType).invoke(view, A2_MODE)
             else { View::class.java.getMethod("resetEinkUpdateMode").invoke(view); view.postInvalidateOnAnimation() }
             
             
             
             view.setBackgroundColor(if (value) AndroidColor.WHITE else AndroidColor.TRANSPARENT)
             enabled = value
-        } catch (e: Exception) { Log.w("RelayDuScroll", "E-ink DU unavailable: ${e.message}") }
+        } catch (e: Exception) { Log.w("RelayA2Scroll", "E-ink A2 unavailable: ${e.message}") }
     }
 }
 
 
 @Composable
-internal fun DuWhileScrolling(scrollState: ScrollState) {
+internal fun A2WhileScrolling(scrollState: ScrollState) {
     val view = LocalView.current
-    val controller = remember(view) { DuScrollController(view) }
+    val controller = remember(view) { A2ScrollController(view) }
     LaunchedEffect(scrollState, controller) {
         snapshotFlow { scrollState.isScrollInProgress }.distinctUntilChanged().collectLatest {
             if (it) controller.setEnabled(true) else { delay(RELEASE_DELAY_MS); controller.setEnabled(false) }

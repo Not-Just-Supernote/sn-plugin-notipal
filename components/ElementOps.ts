@@ -1,4 +1,6 @@
 import { PluginCommAPI, PluginNoteAPI, PluginFileAPI } from 'sn-plugin-lib';
+import { NativeModules } from 'react-native';
+import { getHostPageSize } from './HostPageCoordinates';
 
 const TAG = '[ElementOps]';
 const MARKER_PT = 11;
@@ -50,6 +52,23 @@ export async function modifyLiveElements(elements: any[], page: number): Promise
     if (Array.isArray(res.result)) modified.push(...res.result);
   }
   return { success: true, result: modified };
+}
+
+
+export async function modifyPaletteElements(filePath: string, page: number, elements: any[], style: {
+  penColor: number | null; thickness: number | null; penType: number | null;
+}): Promise<any> {
+  const size = await getHostPageSize(filePath, page, 'palette-write');
+  if (!size) throw new Error('Palette page size unavailable');
+  const uuids = elements.map(el => el.uuid);
+  if (uuids.some(uuid => typeof uuid !== 'string' || !uuid)) throw new Error('Palette element identity missing');
+  const local = await NativeModules.FloatingToolbar.applyContourPalette(uuids, {
+    filePath, pageNum: page, pageWidth: size.width, pageHeight: size.height,
+  }, style);
+  if (local?.handled) return local;
+  return /\.note$/i.test(filePath)
+    ? modifyLiveElements(elements, page)
+    : modifyFileElements(filePath, page, elements);
 }
 
 

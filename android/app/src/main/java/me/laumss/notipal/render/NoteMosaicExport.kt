@@ -29,6 +29,7 @@ object NoteMosaicExport {
     fun exportCurrentNote(
         ctx: ReactApplicationContext,
         outFile: File,
+        onProgress: (Int, Int) -> Unit = { _, _ -> },
         onDone: (Exported?, String?) -> Unit,
     ) {
         PageImageSource.callHost(ctx, "getCurrentFilePath", emptyList()) { pathValue, pathError ->
@@ -43,7 +44,7 @@ object NoteMosaicExport {
                     onDone(null, totalError ?: "note page count empty")
                     return@callHost
                 }
-                Export(ctx, path, total, outFile, onDone).start()
+                Export(ctx, path, total, outFile, onProgress, onDone).start()
             }
         }
     }
@@ -53,6 +54,7 @@ object NoteMosaicExport {
         val path: String,
         val total: Int,
         val outFile: File,
+        val onProgress: (Int, Int) -> Unit,
         val onDone: (Exported?, String?) -> Unit,
     ) {
         private val started = SystemClock.elapsedRealtime()
@@ -66,6 +68,8 @@ object NoteMosaicExport {
                     outFile.parentFile?.mkdirs()
                     out = JsonWriter(outFile.bufferedWriter()).apply {
                         beginObject().name("kind").value("note")
+                        name("version").value(2L)
+                        name("coordinateSpace").value("note-page-px")
                         name("source").value(path)
                         name("pages").beginArray()
                     }
@@ -80,6 +84,7 @@ object NoteMosaicExport {
                 complete()
                 return
             }
+            if (attempt == 0 && (page == 0 || page % 5 == 0 || page == total - 1)) onProgress(page + 1, total)
             PageImageSource.callHost(ctx, "getPageSize", listOf(path, page)) { sizeValue, sizeError ->
                 val size = sizeValue as? SizeF
                 if (size == null || !(size.width > 0f) || !(size.height > 0f)) {
@@ -120,10 +125,21 @@ object NoteMosaicExport {
             writer.name("width").value(size.width.toInt().toLong())
             writer.name("height").value(size.height.toInt().toLong()).endObject()
             writer.name("strokes").beginArray()
+            var pageStrokes = 0
+            var contourStrokes = 0
+            val skipped = linkedMapOf<String, Int>()
             for (el in elements) {
-                if (ClipboardElementIo.writeStroke(writer, el) == null) strokeCount++
+                val reason = ClipboardElementIo.writeStroke(writer, el, includeContours = true)
+                if (reason == null) {
+                    strokeCount++; pageStrokes++
+                    if (el.contoursSrc?.any { it.isNotEmpty() } == true) contourStrokes++
+                } else {
+                    skipped[reason] = (skipped[reason] ?: 0) + 1
+                    check(el.type != Element.TRAIL_TYPE_STROKE && el.type != 700) { "Handwriting export incomplete: $reason trail=${el.trailNumInPage}" }
+                }
             }
-            writer.endArray().endObject()
+            writer.endArray().name("strokeCount").value(pageStrokes.toLong()).endObject()
+            Log.i(TAG, "[NOTE-MOSAIC] pageSize=$size strokes=$pageStrokes contours=$contourStrokes skipped=$skipped")
         }
 
         private fun complete() {

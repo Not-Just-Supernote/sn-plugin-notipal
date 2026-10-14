@@ -92,7 +92,7 @@ fun MessageDetailContent(
 @Composable
 private fun ColumnScope.ReadContent(message: RelayMessage?, document: me.laumss.notipal.relay.core.MarkdownDocument, canReplace: Boolean, onSelect: () -> Unit, onReplace: () -> Unit, onDelete: () -> Unit, onBack: () -> Unit) {
     val scroll = rememberScrollState()
-    if (message != null) DuWhileScrolling(scroll)
+    if (message != null) A2WhileScrolling(scroll)
     
     
     

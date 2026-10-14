@@ -2036,8 +2036,8 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         syncDocumentTextSelectionGuard()
         FloatingPenGuard.setAppContext(document)
         
-        if (document) DocChromeProbe.request("app mode: $reason")
-        else DocChromeProbe.clear("note mode: $reason")
+        DocChromeProbe.clear("app mode: $reason")
+        DocChromeProbe.request("app mode: $reason")
         
         if (appChanged) {
             emitEvent("onHostAppModeChanged", Arguments.createMap().apply {
@@ -2636,6 +2636,26 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             putInt("right", (display.right * pageWidth / screenWidth).coerceIn(0, pageWidth))
             putInt("bottom", (display.bottom * pageHeight / screenHeight).coerceIn(0, pageHeight))
         })
+    }
+
+    @ReactMethod
+    fun clearClipboardContours(uuids: ReadableArray, context: ReadableMap, promise: Promise) {
+        ClipboardElementIo.clearContours(reactApplicationContext, uuids, context, promise)
+    }
+
+    @ReactMethod
+    fun applyContourPalette(uuids: ReadableArray, context: ReadableMap, style: ReadableMap, promise: Promise) {
+        ClipboardElementIo.applyContourPalette(reactApplicationContext, uuids, context, style, promise)
+    }
+
+    @ReactMethod
+    fun convertClipboardSticker(metadata: ReadableArray, context: ReadableMap, promise: Promise) {
+        ClipboardElementIo.convertSticker(reactApplicationContext, metadata, context, promise)
+    }
+
+    @ReactMethod
+    fun restoreClipboardContours(path: String, promise: Promise) {
+        ClipboardElementIo.restoreContours(path, promise)
     }
 
     @ReactMethod
@@ -3827,6 +3847,10 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 }
             }
             view.background = null
+            if (iconId == NOTE_TO_MOSAIC_TOOL_ID) {
+                view.contentDescription = NativeLocale.t("mosaic_note_import")
+                view.tooltipText = NativeLocale.t("mosaic_note_import")
+            }
             view.layoutParams = LinearLayout.LayoutParams(sidebarBtnSz, sidebarBtnSz).apply {
                 marginEnd = dpToPx(1)
             }
@@ -4250,7 +4274,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         return icon
     }
 
-    
     private fun isReactContextUsable(): Boolean = try {
         reactApplicationContext.hasActiveReactInstance()
     } catch (_: Throwable) { false }
@@ -6130,7 +6153,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             Unit
         }
         requestScreenshotStoragePermissions(
-            action = "import note into Mosaic",
+            action = NativeLocale.t("mosaic_note_import"),
             onGranted = {
                 requestMosaicPluginPermissions { mosaicResult ->
                     if (mosaicResult != MosaicPermissionResult.GRANTED) {
@@ -6141,7 +6164,11 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                     val pagesFile = MosaicLink.newNoteImportFile()
                         ?: return@requestMosaicPluginPermissions finishFailed()
                     showScreenshotMessage("mosaic_note_importing")
-                    NoteMosaicExport.exportCurrentNote(reactApplicationContext, pagesFile) { exported, error ->
+                    NoteMosaicExport.exportCurrentNote(reactApplicationContext, pagesFile,
+                        onProgress = { page, total -> handler.post {
+                            Dialog.tip(reactApplicationContext, NativeLocale.t("mosaic_note_import_progress", page, total))
+                        } },
+                    ) { exported, error ->
                         if (exported == null) {
                             Log.w(TAG, "note import export failed: $error")
                             finishFailed()
@@ -6154,6 +6181,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                             return@exportCurrentNote
                         }
                         noteImportBusy = false
+                        Dialog.tip(reactApplicationContext, NativeLocale.t("mosaic_note_import_ready", exported.pageCount))
                         openMosaicPluginForPending()
                     }
                 }
@@ -6399,7 +6427,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 }
                 HostPenSignals.scheduleForegroundReassert(fgKey)
             }
-            if (fgPkg == DOC_PACKAGE) DocChromeProbe.request("foreground: $fgKey")
+            DocChromeProbe.request("foreground: $fgKey")
         }
 
         if (fgPkg == SETTINGS_PACKAGE) {
