@@ -824,23 +824,9 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                     "configFallback: plugin-purpose session active (pendingScreen=$pendingScreen), skip")
                 return@Runnable
             }
-            val lastShowType = readLastShowType(inst.reactApplicationContext)
-            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "configFallback: lastShowType=$lastShowType")
             val hostSnapshot = readHostEntrySnapshot(inst.reactApplicationContext)
-            val explicitConfigEntry = hostSnapshot?.hasConfigEvent == true
-            
-            
-            
-            
-            val inferredConfigEntry = hostSnapshot != null &&
-                hostSnapshot.lastShowType == 1 &&
-                hostSnapshot.pluginViewVisible &&
-                !hostSnapshot.hasButtonEvent &&
-                !isSelfInitiatedHostShow()
-            if (!explicitConfigEntry && !inferredConfigEntry) {
-                if (BuildConfig.ENABLE_DEBUG) {
-                    Log.i(TAG, "configFallback: current host entry is a toolbar/button session, skip")
-                }
+            if (hostSnapshot?.opensConfig(isSelfInitiatedHostShow()) != true) {
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "configFallback: entry not owned config $hostSnapshot")
                 return@Runnable
             }
             if (ConfigPanel.currentInstance?.isActuallyVisible == true) {
@@ -855,13 +841,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             inst.closeHostPluginView()
         }
 
-        private data class HostEntrySnapshot(
-            val lastShowType: Int,
-            val pluginViewVisible: Boolean,
-            val hasButtonEvent: Boolean,
-            val hasConfigEvent: Boolean,
-        )
-
         @JvmStatic
         private fun readHostEntrySnapshot(ctx: ReactApplicationContext): HostEntrySnapshot? {
             return try {
@@ -870,31 +849,10 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 paField.isAccessible = true
                 val pa = paField.get(pm) ?: return null
 
-                fun readField(name: String): Any? = try {
-                    findDeclaredFieldStatic(pa.javaClass, name)
-                        ?.apply { isAccessible = true }
-                        ?.get(pa)
-                } catch (_: Throwable) { null }
-
-                val eventNames = (readField("pluginEventCacheList") as? List<*>)
-                    ?.map { it?.javaClass?.simpleName.orEmpty() }
-                    .orEmpty()
-                HostEntrySnapshot(
-                    lastShowType = (readField("lastShowType") as? Number)?.toInt() ?: -1,
-                    pluginViewVisible = (readField("pluginView") as? View)?.visibility == View.VISIBLE,
-                    hasButtonEvent = eventNames.any { it.contains("PluginButtonEvent") },
-                    hasConfigEvent = eventNames.any { it.contains("ConfigButtonPressEvent") },
-                )
+                HostEntrySnapshot.read(pa)
             } catch (_: Throwable) {
                 null
             }
-        }
-
-        @JvmStatic
-        private fun readLastShowType(ctx: ReactApplicationContext): Int {
-            return try {
-                readHostEntrySnapshot(ctx)?.lastShowType ?: -1
-            } catch (_: Throwable) { -1 }
         }
 
         @JvmStatic
@@ -934,7 +892,10 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 return
             }
             if (showing) {
-                if (configPanelBlocksToolbar()) {
+                val hostEntry = readHostEntrySnapshot(inst.reactApplicationContext)
+                val ownsHost = hostEntry?.isCurrentOwner == true
+                Log.i(TAG, "[HOST-ENTRY] visible ownerMatch=$ownsHost snapshot=$hostEntry")
+                if (ownsHost && configPanelBlocksToolbar()) {
                     if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "onPluginHostStateChanged: config panel active, close host")
                     inst.closeHostPluginView()
                     return
@@ -942,8 +903,13 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 
                 
                 
-                val toolbarOwnsHost = toolbarShowOwnsHostEntry()
-                val selfInitiated = toolbarOwnsHost || isSelfInitiatedHostShow() || pendingScreen.isNotEmpty()
+                val toolbarOwnsHost = ownsHost && toolbarShowOwnsHostEntry()
+                val selfInitiated = ownsHost &&
+                    (toolbarOwnsHost || isSelfInitiatedHostShow() || pendingScreen.isNotEmpty())
+                if (!ownsHost) {
+                    
+                    ToolRegistry.suspendAll()
+                }
                 val rootAtShowEdge = rootView?.takeIf { it.isAttachedToWindow }
                 if (rootAtShowEdge != null && !toolbarOwnsHost) {
                     markToolbarForRestore()
@@ -966,7 +932,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                     }
                 }
                 monitorHandler.removeCallbacks(configFallbackRunnable)
-                if (!selfInitiated) {
+                if (ownsHost && !selfInitiated) {
                     monitorHandler.postDelayed(configFallbackRunnable, 200)
                 } else if (BuildConfig.ENABLE_DEBUG) {
                     Log.i(TAG, "onPluginHostStateChanged: toolbar/plugin-owned show " +
@@ -1951,6 +1917,12 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                     findDeclaredField(pa.javaClass, name)
                         ?.apply { isAccessible = true }?.get(pa)
                 } catch (_: Exception) { null }
+                val entry = HostEntrySnapshot.read(pa)
+                if (!entry.isCurrentOwner) {
+                    Log.i(TAG, "[HOST-ENTRY] ignore background mount snapshot=$entry")
+                    promise.resolve(result)
+                    return@post
+                }
                 val state = readField("state")
                 val stateName = (state as? Enum<*>)?.name ?: state?.toString()
                 val cache = readField("pluginEventCacheList") as? List<*>
@@ -1972,19 +1944,8 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                     } catch (e: Exception) {
                         Log.e(TAG, "hostdiag: onMounted invoke failed: ${e.message}")
                     }
-                } else if (lastShowType == 1) {
-                    
-                    
-                    
-                    
-                    
-                    
-                    val pluginViewVisible = (readField("pluginView") as? View)?.visibility == View.VISIBLE
-                    if (pluginViewVisible && !isSelfInitiatedHostShow()) {
-                        result = "config"
-                    } else if (BuildConfig.ENABLE_DEBUG) {
-                        Log.i(TAG, "hostdiag: stale lastShowType=1 ignored (visible=$pluginViewVisible, selfShow=${isSelfInitiatedHostShow()})")
-                    }
+                } else if (entry.opensConfig(isSelfInitiatedHostShow())) {
+                    result = "config"
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "hostdiag: error: ${e.message}")

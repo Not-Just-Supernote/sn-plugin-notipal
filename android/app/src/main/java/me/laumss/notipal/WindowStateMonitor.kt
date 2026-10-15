@@ -11,7 +11,7 @@ import java.lang.reflect.Proxy
 
 class WindowStateMonitor(private val reactContext: ReactApplicationContext) {
 
-    
+
     fun isFor(context: ReactApplicationContext): Boolean = reactContext === context
 
     companion object {
@@ -25,7 +25,7 @@ class WindowStateMonitor(private val reactContext: ReactApplicationContext) {
         private val handler = Handler(Looper.getMainLooper())
     }
 
-    
+
     private val startRequested = java.util.concurrent.atomic.AtomicBoolean(false)
 
     private var hooked = false
@@ -34,6 +34,7 @@ class WindowStateMonitor(private val reactContext: ReactApplicationContext) {
     private var listenerField: java.lang.reflect.Field? = null
     private var originalListener: Any? = null
     private var proxyListener: Any? = null
+    private var visibilityGeneration = 0L
 
     private val hookRunnable = Runnable { tryHook() }
 
@@ -47,7 +48,7 @@ class WindowStateMonitor(private val reactContext: ReactApplicationContext) {
         handler.post { sync() }
     }
 
-    
+
     private fun sync() {
         if (startRequested.get()) {
             if (!hooked) {
@@ -55,10 +56,10 @@ class WindowStateMonitor(private val reactContext: ReactApplicationContext) {
                 handler.removeCallbacks(hookRunnable)
                 tryHook()
             } else {
-                
-                
-                
-                
+
+
+
+
                 refreshCurrentVisibility()
             }
         } else {
@@ -67,7 +68,7 @@ class WindowStateMonitor(private val reactContext: ReactApplicationContext) {
         }
     }
 
-    
+
     private fun refreshCurrentVisibility() {
         val current = container
         val live = findPluginContainer()
@@ -78,8 +79,8 @@ class WindowStateMonitor(private val reactContext: ReactApplicationContext) {
             return
         }
         if (current !== live) {
-            
-            
+
+
             if (BuildConfig.ENABLE_DEBUG) {
                 Log.i(TAG, "visibility refresh: container instance changed")
             }
@@ -91,7 +92,7 @@ class WindowStateMonitor(private val reactContext: ReactApplicationContext) {
         onContainerVisibility(live.visibility == View.VISIBLE, force = true)
     }
 
-    
+
     private fun tryHook() {
         if (!startRequested.get() || hooked) return
         val ok = hookInternal()
@@ -124,16 +125,16 @@ class WindowStateMonitor(private val reactContext: ReactApplicationContext) {
             field.isAccessible = true
             val original = field.get(c)
             if (original != null && Proxy.isProxyClass(original.javaClass)) {
-                
+
                 if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "listener already wrapped, skip")
                 hooked = true
                 container = c
                 listenerField = field
                 return true
             }
-            val iface = field.type 
+            val iface = field.type
             val proxy = Proxy.newProxyInstance(iface.classLoader, arrayOf(iface)) { proxyObj, method, args ->
-                
+
                 if (method.declaringClass == Any::class.java) {
                     return@newProxyInstance when (method.name) {
                         "hashCode" -> System.identityHashCode(proxyObj)
@@ -142,7 +143,7 @@ class WindowStateMonitor(private val reactContext: ReactApplicationContext) {
                         else -> null
                     }
                 }
-                
+
                 var result: Any? = null
                 if (original != null) {
                     try {
@@ -164,18 +165,18 @@ class WindowStateMonitor(private val reactContext: ReactApplicationContext) {
             proxyListener = proxy
             hooked = true
 
-            
-            
-            
-            
+
+
+
+
             onContainerVisibility(c.visibility == View.VISIBLE, force = true)
             if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "hooked PluginContainer.visibilityListener (original=${original?.javaClass?.name})")
             return true
         } catch (e: AssertionError) {
-            
-            
-            
-            
+
+
+
+
             if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "React bridge transition: ${e.message}")
             return false
         } catch (e: Exception) {
@@ -189,7 +190,7 @@ class WindowStateMonitor(private val reactContext: ReactApplicationContext) {
             val c = container ?: return
             val field = listenerField ?: return
             val current = field.get(c)
-            
+
             if (current != null && current === proxyListener) {
                 field.set(c, originalListener)
                 if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "unhooked, original listener restored")
@@ -205,20 +206,23 @@ class WindowStateMonitor(private val reactContext: ReactApplicationContext) {
         }
     }
 
-    
+
     private fun onContainerVisibility(visible: Boolean, force: Boolean = false) {
         val showing = visible
         if (!force && showing == isPluginHostShowing) return
         isPluginHostShowing = showing
         if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "PluginHost window state changed: showing=$showing")
-        if (Looper.myLooper() == Looper.getMainLooper()) {
-            FloatingToolbarModule.onPluginHostStateChanged(showing)
-        } else {
-            handler.post { FloatingToolbarModule.onPluginHostStateChanged(showing) }
+        
+        
+        val generation = ++visibilityGeneration
+        handler.post {
+            if (startRequested.get() && generation == visibilityGeneration) {
+                FloatingToolbarModule.onPluginHostStateChanged(showing)
+            }
         }
     }
 
-    
+
     private fun findPluginContainer(): ViewGroup? {
         return try {
             val pm = reactContext.catalystInstance?.getNativeModule("NativePluginManager") ?: return null
@@ -237,7 +241,7 @@ class WindowStateMonitor(private val reactContext: ReactApplicationContext) {
         }
     }
 
-    
+
     private fun Class<*>.declaredFieldOrNull(name: String): java.lang.reflect.Field? {
         var cls: Class<*>? = this
         while (cls != null) {
