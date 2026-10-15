@@ -289,6 +289,7 @@ internal object HostPenSignals {
 
     
     fun onDocWriteAreaRebuilt(): Unit = onMain {
+        DocChromeProbe.request("document write-area rebuilt")
         if (docLassoHoldArmedAt != 0L || docStickerHoldArmedAt != 0L) {
             FloatingPenGuard.reassert("doc selection write-area rebuilt")
         } else {

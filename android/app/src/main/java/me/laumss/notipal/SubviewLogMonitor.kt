@@ -547,6 +547,15 @@ object SubviewLogMonitor {
         
         
         trackDocDisabledOverlay(myGen, line)
+        if (FloatingToolbarModule.isDocumentContext()) {
+            when {
+                (line.contains("DocumentActivity") && line.contains("pageBarVisible")) ||
+                    (line.contains("SideBarView") && line.contains("setPageBarVisible")) ->
+                    DocChromeProbe.request("document page bar visibility requested")
+                line.contains("DoubleSlideBarManager") && line.contains("setPenFloatingStatus: false") ->
+                    DocChromeProbe.request("document pen floating ended")
+            }
+        }
         
         if (line.contains("SideBarView") && SIDEBAR_LAYOUT_SIGNAL.containsMatchIn(line)) {
             DocChromeProbe.request("sidebar: ${line.substringAfter("SideBarView").trim().take(60)}")

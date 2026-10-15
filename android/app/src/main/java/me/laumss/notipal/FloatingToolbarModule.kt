@@ -301,6 +301,14 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         }
 
         
+        private fun syncPluginHostGuard() {
+            FloatingPenGuard.setFullScreenActive(
+                isInNoteApp && isPluginHostWindowShowing && !mosaicMode,
+                PenGuardOwner.PLUGIN_HOST,
+            )
+        }
+
+        
         @JvmStatic
         fun isTextReceiveModeActive(): Boolean = activeModeIds.contains(INSERT_TEXT_TOOL_ID)
 
@@ -738,6 +746,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                     
                     
                     FloatingPenGuard.setFullScreenActive(true, PenGuardOwner.HOST_TOOLBAR_MENU)
+                    if (isDocumentContext()) DocChromeProbe.request("document toolbar menu opened")
                     if (rootView != null) inst.removeAll()
                     FloatingBubbleModule.hideStatic()
                     AiBubbleModule.hideStatic()
@@ -902,6 +911,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         fun onPluginHostStateChanged(showing: Boolean) {
             if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "onPluginHostStateChanged: showing=$showing")
             isPluginHostWindowShowing = showing
+            syncPluginHostGuard()
 
             val inst = currentInstance
             if (inst == null) {
@@ -991,6 +1001,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             surfaceBubbleRaisePending = visible && (surfaceBubbleRaisePending || !mosaicMode)
             mosaicMode = visible
             syncDocumentTextSelectionGuard()
+            syncPluginHostGuard()
             mosaicSurface = nextSurface
             mosaicNoteRef = noteRef
             if (visible && nextSurface == MosaicLink.SURFACE_BOARD) {
@@ -6501,6 +6512,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             }
         }
         syncDocumentTextSelectionGuard()
+        syncPluginHostGuard()
     }
 
     fun startForegroundMonitor() {

@@ -818,7 +818,7 @@ internal object FloatingPenGuard {
         val changed = if (active) fullScreenOwners.add(owner) else fullScreenOwners.remove(owner)
         if (!changed) return
         Log.i(TAG, "fullScreen=${fullScreenOwners.isNotEmpty()} owner=$owner active=$active owners=$fullScreenOwners")
-        submitSnapshot()
+        submitSnapshot(restoringHost = !active && owner == PenGuardOwner.PLUGIN_HOST)
     }
 
     
@@ -893,7 +893,7 @@ internal object FloatingPenGuard {
         Log.i(TAG, "Mosaic snapshot republished reason=$reason toolbar=$toolbarRect")
     }
 
-    private fun submitSnapshot() {
+    private fun submitSnapshot(restoringHost: Boolean = false) {
         val state = synchronized(rects) {
             
             
@@ -920,6 +920,19 @@ internal object FloatingPenGuard {
         val outgoing = state.first.second
         val baselineReady = state.first.third
         val leavingFullScreen = !isFullScreenSnapshot(inklingSnapshot) && state.second
+        if (restoringHost && !isFullScreenSnapshot(inklingSnapshot) &&
+            (inklingSnapshot.isEmpty() || !baselineReady)) {
+            
+            
+            pendingSend.set(null)
+            synchronized(rects) {
+                lastQueuedSnapshot.clear()
+                lastSentSnapshot.clear()
+                hostTableDirty = true
+            }
+            Log.i(TAG, "host restore handoff inkling=$inklingSnapshot baselineReady=$baselineReady")
+            return
+        }
         if (!baselineReady && !isFullScreenSnapshot(inklingSnapshot) && !leavingFullScreen &&
             !canPublishDocumentLocalAreas(inklingSnapshot)) {
             if (BuildConfig.ENABLE_DEBUG) {

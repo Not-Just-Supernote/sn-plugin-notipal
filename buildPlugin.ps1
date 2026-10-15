@@ -11,6 +11,17 @@ function Test-WithLogsEnabled {
     return $script:BuildWithLogs
 }
 
+function Write-PluginJson {
+    param(
+        [string]$Path,
+        [object]$Value
+    )
+
+    $json = $Value | ConvertTo-Json -Depth 10
+    $encoding = New-Object System.Text.UTF8Encoding($false)
+    [IO.File]::WriteAllText([IO.Path]::GetFullPath($Path), $json + [Environment]::NewLine, $encoding)
+}
+
 function Write-ColorOutput {
     param(
         [string]$Message,
@@ -200,7 +211,7 @@ function New-PluginConfig {
     }
 
     try {
-        $config | ConvertTo-Json -Depth 10 | Set-Content $configFile -Encoding UTF8
+        Write-PluginJson -Path $configFile -Value $config
         Write-ColorOutput "PluginConfig.json file created: $configFile" 'Green'
     }
     catch {
@@ -238,7 +249,7 @@ function Increment-PluginVersion {
             $config.versionName = $newName
         }
 
-        $config | ConvertTo-Json -Depth 10 | Set-Content $ConfigFile -Encoding UTF8
+        Write-PluginJson -Path $ConfigFile -Value $config
         Write-ColorOutput "Plugin version advanced: $oldName → $newName, code $oldCode → $newCode" 'Green'
     }
     catch {
@@ -296,7 +307,7 @@ function Update-PluginConfigPackages {
         )
         $configHash.reactPackages = $uniquePackages
 
-        $configHash | ConvertTo-Json -Depth 10 | Set-Content $configFile -Encoding UTF8
+        Write-PluginJson -Path $configFile -Value $configHash
         Write-ColorOutput 'PluginConfig.json in build/generated folder updated with reactPackages field' 'Green'
     }
     catch {
@@ -729,7 +740,7 @@ function Remove-NativeCodePackageReference {
         $property = $config.PSObject.Properties['nativeCodePackage']
         if ($null -eq $property) { return $true }
         $config.PSObject.Properties.Remove('nativeCodePackage')
-        $config | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $ConfigFile -Encoding UTF8
+        Write-PluginJson -Path $ConfigFile -Value $config
         Write-ColorOutput "Removed nativeCodePackage reference from $ConfigFile" 'Yellow'
         return $true
     }
@@ -879,7 +890,7 @@ function Copy-ApkAndUpdateConfig {
 
         $configHash.nativeCodePackage = "/$newApkFileName"
 
-        $configHash | ConvertTo-Json -Depth 10 | Set-Content $BuildGeneratedConfigFile -Encoding UTF8
+        Write-PluginJson -Path $BuildGeneratedConfigFile -Value $configHash
         Write-ColorOutput "PluginConfig.json in build/generated folder updated with nativeCodePackage field: /$newApkFileName" 'Green'
 
         return $true
@@ -1053,7 +1064,7 @@ function Copy-IconAndUpdatePath {
 
                 $configHash.iconPath = "/$iconFileName"
 
-                $configHash | ConvertTo-Json -Depth 10 | Set-Content $BuildGeneratedConfigFile -Encoding UTF8
+                Write-PluginJson -Path $BuildGeneratedConfigFile -Value $configHash
                 Write-ColorOutput "Updated iconPath field in build/generated folder's PluginConfig.json: $iconFileName" 'Green'
             } else {
                 Write-ColorOutput "Icon file does not exist: $sourceIconPath" 'Yellow'
@@ -1223,7 +1234,7 @@ function Main {
         $cfgHash = @{}
         $cfg.PSObject.Properties | ForEach-Object { $cfgHash[$_.Name] = $_.Value }
         $cfgHash.name = $cfgHash.name + ' - Dev'
-        $cfgHash | ConvertTo-Json -Depth 10 | Set-Content $buildGeneratedConfigFile -Encoding UTF8
+        Write-PluginJson -Path $buildGeneratedConfigFile -Value $cfgHash
         Write-ColorOutput "Dev build: name set to '$($cfgHash.name)'" 'Yellow'
     }
 

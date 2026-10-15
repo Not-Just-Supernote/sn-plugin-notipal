@@ -1,8 +1,9 @@
 
 
-import { AppRegistry, Image, DeviceEventEmitter } from 'react-native';
+import { AppRegistry, Image, DeviceEventEmitter, TurboModuleRegistry } from 'react-native';
 import App from './App';
 import { PluginManager, PluginDocAPI, FileUtils } from 'sn-plugin-lib';
+import pluginSdkPackage from 'sn-plugin-lib/package.json';
 import { ensureInit, stopAllModes, startLocalSend, stopLocalSend } from './components/BackgroundService';
 import { PluginCommAPI } from 'sn-plugin-lib';
 import { loadClips, clipFilledFlags } from './components/ToolPresets';
@@ -39,6 +40,9 @@ if (!ENABLE_DEBUG) {
 
 AppRegistry.registerComponent('me_laumss_notipal', () => App);
 
+
+
+TurboModuleRegistry.getEnforcing('NativePluginManager').reportSdkVersion(pluginSdkPackage.version);
 PluginManager.init();
 setLocale(getLocale());
 
@@ -64,7 +68,8 @@ async function reportPluginVersion() {
     if (!dir || !RNFS) return;
     const path = `${dir}/PluginConfig.json`;
     if (!(await RNFS.exists(path))) return;
-    const cfg = JSON.parse(await RNFS.readFile(path, 'utf8'));
+    const configText = await RNFS.readFile(path, 'utf8');
+    const cfg = JSON.parse(configText.replace(/^\uFEFF/, ''));
     if (cfg && cfg.versionName) {
       FloatingToolbarBridge.setPluginVersion(String(cfg.versionName), String(cfg.versionCode ?? ''));
     }

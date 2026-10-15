@@ -28,6 +28,7 @@ internal object PenGuardOwner {
     const val HOST_LASSO_MENU = "host-lasso-menu"
     const val NOTE_SUBVIEW = "note-subview"
     const val DOC_TEXT_SELECTION = "doc-text-selection"
+    const val PLUGIN_HOST = "plugin-host"
 
     const val INSERT_IMAGE = "insert-image"
     const val PALETTE_APPLY = "palette-apply"
@@ -55,7 +56,7 @@ internal object PenGuardOwner {
         owner == HOST_BOOTSTRAP || owner == ROTATION_SYNC || owner == FOREIGN_ACTIVITY ->
             PenGuardScope.SYSTEM
         owner == HOST_TOOLBAR_MENU || owner == HOST_LASSO_MENU || owner == NOTE_SUBVIEW ||
-            owner == DOC_TEXT_SELECTION ->
+            owner == DOC_TEXT_SELECTION || owner == PLUGIN_HOST ->
             PenGuardScope.HOST_UI
         owner == INSERT_IMAGE || owner == PALETTE_APPLY ||
             owner == DOC_LASSO || owner == DOC_STICKER -> PenGuardScope.FLOW

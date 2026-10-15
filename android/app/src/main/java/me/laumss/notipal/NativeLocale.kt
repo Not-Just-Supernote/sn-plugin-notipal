@@ -147,8 +147,8 @@ object NativeLocale {
         "about_discord_desc"     to ("用手机扫码加入，交流用法、反馈问题，第一时间获取更新。"
                                      to "Scan with your phone to join: share tips, report issues and get updates first."),
         "about_feedback_title"   to ("邮件反馈问题" to "Send feedback by email"),
-        "about_feedback_desc"    to ("用手机扫码写邮件，会自动附上版本和设备信息。"
-                                     to "Scan with your phone to write an email; version and device info are filled in."),
+        "about_feedback_desc"    to ("你的反馈将会非常有用。"
+                                     to "I’d love to hear your feedback."),
         "about_feedback_subject" to ("反馈" to "feedback"),
         "about_feedback_body"    to ("问题描述：" to "What happened:"),
         "config_default_peer"    to ("默认发送设备" to "Default send device"),

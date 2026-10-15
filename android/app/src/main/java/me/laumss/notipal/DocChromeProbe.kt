@@ -9,7 +9,6 @@ import java.util.concurrent.Executors
 
 internal object DocChromeProbe {
     private const val TAG = "DocChromeProbe"
-    private const val SETTLE_MS = 400L
     private const val DOC_ACTIVITY_MARKER = "ACTIVITY com.supernote.document/"
     private const val NOTE_ACTIVITY_MARKER = "ACTIVITY com.ratta.supernote.note/"
 
@@ -18,47 +17,39 @@ internal object DocChromeProbe {
     @Volatile private var pendingReason = ""
     @Volatile private var probeInFlight = false
     @Volatile private var contextEpoch = 0L
-    private var absentMenuToken: Pair<Int, Long>? = null
 
     
     private val VIEW_LINE =
         Regex("""^( *)([A-Za-z0-9_.$]+)\{[0-9a-f]+ (\S)\S* \S+ (-?\d+),(-?\d+)-(-?\d+),(-?\d+)""")
 
+    private var probePending = false
     private val probeRunnable: Runnable = Runnable {
-        val reason = pendingReason
-        val document = FloatingToolbarModule.isDocumentContext()
         if (probeInFlight) {
-            request(pendingReason)
+            probePending = true
             return@Runnable
         }
-        probeInFlight = true
+        val reason = pendingReason
+        val document = FloatingToolbarModule.isDocumentContext()
         val epoch = contextEpoch
         val menuToken = SubviewLogMonitor.toolbarMenuProbeToken()
+        probePending = false
+        probeInFlight = true
         worker.execute {
             val snapshot = query(document)
             main.post {
                 probeInFlight = false
-                if (epoch != contextEpoch) return@post
-                if (snapshot == null) {
-                    absentMenuToken = null
-                    return@post
-                }
-                if (FloatingToolbarModule.isDocumentContext() == document) {
+                if (epoch == contextEpoch && snapshot != null &&
+                    FloatingToolbarModule.isDocumentContext() == document) {
                     FloatingPenGuard.setHostChromeAreas(snapshot.rects, reason)
-                    if (document && menuToken != null && menuToken == SubviewLogMonitor.toolbarMenuProbeToken() &&
-                        snapshot.menuVisible == false) {
-                        if (absentMenuToken == menuToken) {
-                            Log.i(TAG, "document toolbar menus closed generation=${menuToken.first}")
-                            SubviewLogMonitor.closeDocumentToolbarMenu(menuToken)
-                            absentMenuToken = null
-                        } else {
-                            absentMenuToken = menuToken
-                        }
-                    } else {
-                        absentMenuToken = null
+                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG,
+                        "probe reason=$reason document=$document menuVisible=${snapshot.menuVisible} token=$menuToken rects=${snapshot.rects}")
+                    if (document && menuToken != null &&
+                        menuToken == SubviewLogMonitor.toolbarMenuProbeToken() && snapshot.menuVisible == false) {
+                        SubviewLogMonitor.closeDocumentToolbarMenu(menuToken)
                     }
                 }
-
+                
+                if (probePending) request(pendingReason)
             }
         }
     }
@@ -67,12 +58,12 @@ internal object DocChromeProbe {
     fun request(reason: String) {
         pendingReason = reason
         main.removeCallbacks(probeRunnable)
-        main.postDelayed(probeRunnable, SETTLE_MS)
+        main.post(probeRunnable)
     }
 
-    
     fun clear(reason: String) {
         contextEpoch++
+        probePending = false
         main.removeCallbacks(probeRunnable)
         FloatingPenGuard.setHostChromeAreas(emptyList(), reason)
     }
@@ -97,7 +88,7 @@ internal object DocChromeProbe {
     )
 
     
-    internal data class Snapshot(val rects: List<Rect>, val menuVisible: Boolean?)
+    internal data class Snapshot(val rects: List<Rect>, val menuVisible: Boolean?, val bottomVisible: Boolean = false)
 
     internal fun parse(lines: Sequence<String>): List<Rect> = parseSnapshot(lines).rects
 
@@ -107,6 +98,7 @@ internal object DocChromeProbe {
         var resumed = false
         var sawActiveSideBar = false
         var menuVisible = false
+        var bottomVisible = false
         var inHierarchy = false
         var hierarchyIndent = -1
         val stack = ArrayDeque<Node>()
@@ -163,13 +155,14 @@ internal object DocChromeProbe {
             if (resumed && parent?.isSideBar == true && visible && focusable && r > l && b > t) {
                 menuVisible = true
             }
-            val noteBottom = !document &&
+            val bottomChrome =
                 (line.contains("app:id/ll_page}") || line.contains("app:id/ll_fileName}"))
             if (resumed && visible && r > l && b > t &&
-                ((document && inSideBar && cls.endsWith(".ButtonBoxView")) || noteBottom)) {
+                ((document && inSideBar && cls.endsWith(".ButtonBoxView")) || bottomChrome)) {
+                if (bottomChrome) bottomVisible = true
                 out += Rect(left, top, left + (r - l), top + (b - t))
             }
         }
-        return Snapshot(out, if (sawActiveSideBar) menuVisible else null)
+        return Snapshot(out, if (sawActiveSideBar) menuVisible else null, bottomVisible)
     }
 }

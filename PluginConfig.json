@@ -1,4 +1,4 @@
-﻿{
+{
     "name":  "Notipal",
     "author":  "Yalums",
     "pluginID":  "19uq35yjd3tr3zjr",
@@ -10,8 +10,8 @@
                  "zh_TW":  "一款面向筆記與文件的多功能工具集。支援截圖、插入圖片到筆記，透過 LocalSend 傳輸文字、圖片、文件與剪貼簿內容，連接 AI 用戶端，並調整筆跡樣式與元素圖層。",
                  "ja":  "ノートとドキュメント向けの多機能ツールキットです。スクリーンショットの撮影やノートへの画像挿入のほか、LocalSend によるテキスト・画像・ドキュメント・クリップボードの転送、AI クライアントとの連携、手書きスタイルやレイヤーの調整にも対応します。"
              },
-    "versionCode":  "2402",
-    "versionName":  "0.2.165",
+    "versionCode":  "2412",
+    "versionName":  "0.2.175",
     "jsMainPath":  "index",
     "uses-permissions":  [
                              "plugin.permission.FILE:READ",
